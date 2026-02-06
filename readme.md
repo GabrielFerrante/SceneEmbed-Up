@@ -1,5 +1,15 @@
 # SceneEmbed-UP
-O SceneEmbed-UP é um mecanismo avançado de criação e refinamento de Grafos de Cena (Scene Graphs). O projeto integra embeddings multimodais (texto e imagem) e utiliza técnicas de upsampling (AnyUP) para aumentar a densidade e a fidelidade das representações latentes dos nós e das relações no grafo.
+Este repositório implementa uma arquitetura avançada para Geração de Grafos de Cena (Scene Graphs), otimizada para imagens de ultra-alta resolução através da integração de encoders visuais de última geração e LLMs de embedding.
 
 ## Método
-Fusão de embeddings via modelos como DINOV3 para imagens e Qwen3-Embeddings para representação semântica textual. Scene Graph Generation (SGG) para mapeamento de objetos, atributos e predicados relacionais. Latent Upsampling com AnyUP para melhorar a granularidade das representações de cena e Interoperabilidade para exportação de grafos para formatos compatíveis com Graph Neural Networks (GNNs).
+A solução resolve o desafio de processar detalhes minúsculos em imagens grandes sem estourar a memória de vídeo (VRAM), utilizando uma técnica de Projeção via Cross-Attention com Adaptadores LoRA.
+
+**Arquitetura**
+
+* Visual Backbone (DINOv3 + AnyUp):Utilizamos o DINOv3 para extração de features ricas.Aplicamos o upsampler AnyUp para elevar a resolução dos mapas de features para 686x960 (mais de 650 mil tokens visuais). Isso permite que o modelo "enxergue" objetos que desapareceriam em resoluções padrão (224x224).
+
+* Semantic Embedding (Qwen3-8B): O Qwen3-Embedding é utilizado para converter labels de objetos e relações em vetores semânticos de alta dimensão ($4096$).As descrições são processadas com instruções específicas para tarefas de visão computacional.
+
+* LoRA Cross-Attention Aligner: Em vez de uma projeção linear simples, implementamos uma camada de Cross-Attention.Mecânica: O texto (Query) busca informações nos patches da imagem (Key/Value). Isso reduz a complexidade computacional, focando apenas nos pixels relevantes para cada objeto do grafo.
+
+* Eficiência: Utilizamos LoRA (Low-Rank Adaptation) para treinar as matrizes de projeção, permitindo um ajuste fino leve e rápido, mantendo os modelos base congelados.

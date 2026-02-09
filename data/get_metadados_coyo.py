@@ -8,7 +8,7 @@ with open('token-HuggingFace.json', 'r', encoding='utf-8') as file:
 
 # CONFIGURAÇÕES
 REPO_ID = "kakaobrain/coyo-700m"
-PASTA_METADADOS = "F:/COYO/coyo_500gb_meta"
+PASTA_METADADOS = "F:/COYO/coyo_meta"
 # O COYO tem aprox 5.5M de URLs por arquivo. 
 # Baixar 5 arquivos nos dá ~27M de URLs para tentar baixar.
 QTD_ARQUIVOS_META = 5 

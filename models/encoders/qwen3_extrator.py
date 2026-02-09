@@ -23,7 +23,7 @@ class QwenSceneEmbedder:
         self.task_sg = 'Extract semantic features for visual objects and relationships in a scene'
 
     def _last_token_pool(self, last_hidden_states: Tensor, attention_mask: Tensor) -> Tensor:
-        # Mantive sua lógica de pooling que está correta
+       
         sequence_lengths = attention_mask.sum(dim=1) - 1
         batch_size = last_hidden_states.shape[0]
         return last_hidden_states[torch.arange(batch_size, device=last_hidden_states.device), sequence_lengths]

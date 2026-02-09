@@ -1,2 +1,4 @@
 /data/token-HuggingFace.json
 /models/encoders/tokenDINOV3.json
+*.ckpt
+__pycache__

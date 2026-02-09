@@ -1,12 +1,13 @@
 import os
 import glob
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, random_split
 from torch.utils.data.dataloader import default_collate
 from torchvision import transforms
 from PIL import Image
 
-# --- CONFIGURAÇÕES DE IMAGEM ---
+#NOTA: FOI CRIADO OUTRO ENV PARA EXEXUTAR A EXTRAÇÃO DOS DADOS
+
 def get_transforms(image_size=256):
     """
     Define o pipeline de pré-processamento da imagem.
@@ -126,56 +127,120 @@ class CoyoExtractedDataset(Dataset):
         # Retorna o par
         return image, caption
 
-def create_dataloader(
+def create_all_dataloaders(
     root_dir, 
     batch_size=64, 
     image_size=256, 
     num_workers=4, 
     shuffle=True,
+    t = "all"
     
 ):
     """
     Função helper para instanciar o DataLoader pronto para uso.
     """
-    # 1. Cria as transformações
+    #  Cria as transformações
     transform = get_transforms(image_size)
     
-    # 2. Instancia o Dataset
-    dataset = CoyoExtractedDataset(root_dir=root_dir, transform=transform)
+    #  Instancia o Dataset
+    full_dataset = CoyoExtractedDataset(root_dir=root_dir, transform=transform)
+    total_size = len(full_dataset)
     collate_fn = CoyoCollate(tokenizer=None, max_length=77)
-    # 3. Cria o DataLoader
-    # pin_memory=True acelera a transferência da RAM para a VRAM (GPU)
-    loader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        num_workers=num_workers,
-        pin_memory=True,
-        drop_last=True, # Evita problemas com batch incompleto no final
-        collate_fn= collate_fn
+    
+    #  Calcula os tamanhos das divisões (70/20/10)
+    train_size = int(0.7 * total_size)
+    val_size = int(0.2 * total_size)
+    test_size = total_size - train_size - val_size
+    
+    generator = torch.Generator().manual_seed(42)
+    train_dataset, val_dataset, test_dataset = random_split(
+        full_dataset, 
+        [train_size, val_size, test_size],
+        generator=generator
     )
     
-    return loader
-"""
+    print(f"Divisão concluída:")
+    print(f"  Treino: {len(train_dataset)} imagens")
+    print(f"  Validação: {len(val_dataset)} imagens")
+    print(f"  Teste: {len(test_dataset)} imagens")
+    
+    train_loader = DataLoader(
+        train_dataset, batch_size=batch_size, shuffle=True, 
+        num_workers=num_workers, collate_fn=collate_fn, pin_memory=True
+    )
+    
+    val_loader = DataLoader(
+        val_dataset, batch_size=batch_size, shuffle=False, 
+        num_workers=num_workers, collate_fn=collate_fn, pin_memory=True
+    )
+    
+    test_loader = DataLoader(
+        test_dataset, batch_size=batch_size, shuffle=False, 
+        num_workers=num_workers, collate_fn=collate_fn, pin_memory=True
+    )
+    if t == "all":
+        return train_loader, val_loader, test_loader
+    elif t == "train":
+        return train_loader, val_loader
+    elif t == "test":
+        return test_loader
+
 # --- TESTE RÁPIDO ---
 if __name__ == "__main__":
-    loader = create_dataloader("F:/COYO/coyo/extracted", batch_size=4, num_workers=0)
+    PATH = "F:/COYO/coyo/extracted"
     
-    batch = next(iter(loader))
-    
-    # Caso raro de batch vazio (tudo corrompido)
-    if batch is None: 
-        print("Batch vazio!")
-    else:
-        images, texts = batch
+    try:
+        # Cria os 3 loaders usando a estratégia de split (70/20/10)
+        train_loader, val_loader, test_loader = create_all_dataloaders(
+            root_dir=PATH, 
+            batch_size=4, 
+            num_workers=0,  # 0 é melhor para debugar erros de caminho
+            
+        )
         
-        print(f"Images Shape: {images.shape}") # Deve ser [4, 3, 256, 256]
+        # Lista para facilitar o loop de teste
+        loaders = [
+            ("TREINO", train_loader),
+            ("VALIDAÇÃO", val_loader),
+            ("TESTE", test_loader)
+        ]
         
-        if isinstance(texts, list):
-            print(f"Textos (Raw): {texts}")
-        else:
-            # Se usou tokenizer
-            print(f"Input IDs Shape: {texts['input_ids'].shape}") # Deve ser [4, 77]
-            print(f"Attention Mask: {texts['attention_mask'].shape}")
+        print("\n" + "="*30)
+        print("INICIANDO TESTE DOS LOADERS")
+        print("="*30)
+
+        for nome, loader in loaders:
+            print(f"\n--- Testando Loader: {nome} ---")
+            
+            # Pega apenas o primeiro batch de cada loader
+            batch = next(iter(loader))
+            
+            if batch is None:
+                print(f"  [!] Aviso: Batch de {nome} retornou None (vazio ou corrompido).")
+                continue
+                
+            images, texts = batch
+            
+            # Verificações de Shape
+            print(f"  [OK] Imagens Shape: {images.shape}") # Esperado: [4, 3, 256, 256]
+            
+            if isinstance(texts, dict) and 'input_ids' in texts:
+                # Caso com Tokenizer (Hugging Face)
+                print(f"  [OK] Tokenizer Detectado (Input IDs): {texts['input_ids'].shape}")
+                print(f"  [OK] Exemplo de IDs (Primeiro item): {texts['input_ids'][0][:10]}...")
+            else:
+                # Caso Texto Raw (Lista de strings)
+                print(f"  [OK] Texto Raw Detectado. Quantidade: {len(texts)}")
+                print(f"  [OK] Exemplo de Legenda: {texts[0][:50]}...")
+
+        print("\n" + "="*30)
+        print("TESTE FINALIZADO COM SUCESSO!")
+        print("="*30)
+
+    except FileNotFoundError as e:
+        print(f"\n[ERRO] Caminho não encontrado: {e}")
+    except Exception as e:
+        print(f"\n[ERRO] Ocorreu um erro inesperado: {e}")
+        import traceback
+        traceback.print_exc()
         
-"""

@@ -174,7 +174,7 @@ if __name__ == "__main__":
         if isinstance(texts, list):
             print(f"Textos (Raw): {texts}")
         else:
-            # Se usou tokenizer (BERT/CLIP)
+            # Se usou tokenizer
             print(f"Input IDs Shape: {texts['input_ids'].shape}") # Deve ser [4, 77]
             print(f"Attention Mask: {texts['attention_mask'].shape}")
         

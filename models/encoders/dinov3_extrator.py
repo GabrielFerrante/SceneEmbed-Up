@@ -1,5 +1,6 @@
 
 import torch
+import torch.nn as nn
 import json
 from PIL import Image
 from transformers import AutoImageProcessor, AutoModel
@@ -35,10 +36,10 @@ class DinoSceneEncoder:
 
     @torch.inference_mode()
     def extract_features(self, image: Image.Image):
-        # 1. Preparar imagem HR com a normalização correta do modelo
+        # Preparar imagem HR com a normalização correta do modelo
         img_tensor = self.hr_transform(image).unsqueeze(0).to(self.device)
         
-        # 2. Processar pelo DINO
+        # Processar pelo DINO
         inputs = self.processor(images=image, return_tensors="pt").to(self.device)
         outputs = self.model(**inputs)
         
@@ -55,18 +56,17 @@ class DinoSceneEncoder:
         # Seleciona patches espaciais descartando CLS e potenciais Registers
         spatial_tokens = last_hidden_state[:, 1:n_spatial+1, :]
         
-        # 3. Reshape para Grid 2D (B, C, H, W)
+        #  Reshape para Grid 2D (B, C, H, W)
         lr_features = spatial_tokens.transpose(1, 2).reshape(B, C, h_feat, w_feat)
         
         if self.upsampler == "anyup":
-        # 4. Upsampling AnyUp
+       
             any =  hr.AnyUpModel()
-            any.eval()
             hr_features = any.up(img_tensor, lr_features)
         elif self.upsampler == "featup":
-            feat =  hr.FeatUpModel()
-           
-            hr_features = feat.up(lr_features)
+            feat =  hr.load_featup_stack("vit_jbu_stack_cocostuff.ckpt", feat_dim=384)
+            adaptadorFeat = nn.Conv2d(768, 384, kernel_size=1).to(self.device)
+            hr_features = feat(adaptadorFeat(lr_features), img_tensor)
         
         return cls_token, hr_features
 

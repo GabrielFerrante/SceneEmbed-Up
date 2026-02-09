@@ -156,7 +156,7 @@ def create_dataloader(
     )
     
     return loader
-
+"""
 # --- TESTE RÁPIDO ---
 if __name__ == "__main__":
     loader = create_dataloader("F:/COYO/coyo/extracted", batch_size=4, num_workers=0)
@@ -178,3 +178,4 @@ if __name__ == "__main__":
             print(f"Input IDs Shape: {texts['input_ids'].shape}") # Deve ser [4, 77]
             print(f"Attention Mask: {texts['attention_mask'].shape}")
         
+"""

@@ -23,6 +23,8 @@ Cálculo: Se os patches que compõem o "Gato" e os patches que compõem a "Mesa"
 import torch
 import torch.nn.functional as F
 from models.SG.projection import LoRACrossAttentionAligner, calculate_retrieval_score
+from models.encoders.dinov3_extrator import DinoSceneEncoder
+from models.encoders.qwen3_extrator import QwenSceneEmbedder
 
 class SceneGraphGenerator:
     def __init__(self, dino_encoder, qwen_embedder, aligner, threshold=0.3):
@@ -111,3 +113,13 @@ device = "cuda"
 aligner = LoRACrossAttentionAligner(visual_dim=768, text_dim=4096)
 aligner.load_state_dict(torch.load("lora_cross_aligner_weights.pth"), strict=False)
 aligner.to(device).eval()
+
+generator = SceneGraphGenerator(
+    dino_encoder=DinoSceneEncoder(), 
+    qwen_embedder=QwenSceneEmbedder(), 
+    aligner=aligner, 
+    threshold=0.3
+)
+
+# Execução
+#resultado = generator.generate(MinhaImagemPIL, ["homem", "bike"], ["montado em"])

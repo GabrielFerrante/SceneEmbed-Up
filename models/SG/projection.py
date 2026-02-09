@@ -4,12 +4,13 @@ import torch.nn.functional as F
 import math
 
 class LoRACrossAttentionAligner(nn.Module):
-    def __init__(self, visual_dim=768, text_dim=4096, rank=16, num_heads=8):
+    #MUDAR O VISUAL_DIM PARA 768 SE FOR ANYUP OU 384 PRA O FEATUP COM VIT
+    def __init__(self, visual_dim, text_dim, rank=16, num_heads=8):
         super().__init__()
         
         # 1. Projeção Base da Imagem (Congelada)
         self.visual_proj = nn.Linear(visual_dim, text_dim)
-        #BUG FIX: Certifique-se de congelar o Bias também
+        #congelando o Bias também
         self.visual_proj.weight.requires_grad = False
         if self.visual_proj.bias is not None:
             self.visual_proj.bias.requires_grad = False

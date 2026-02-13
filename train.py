@@ -13,23 +13,35 @@ from models.encoders.dinov3_extrator import DinoSceneEncoder
 from models.encoders.qwen3_extrator import QwenSceneEmbedder
 from data.data_utils_pytorch import create_all_dataloaders
 
-
-class ModelCheckpoint:
-    def __init__(self, save_dir="checkpoints", filename="best_aligner.pth"):
+class EarlyStopping:
+    def __init__(self, save_dir="checkpoints", filename="best_aligner.pth", patience=5, min_delta=0.001):
         self.save_dir = save_dir
         self.filename = filename
+        self.patience = patience      # Quantas épocas esperar sem melhora
+        self.min_delta = min_delta    # Mudança mínima para considerar uma melhora
         self.best_acc = 0.0
+        self.counter = 0              # Contador de épocas sem melhora
+        self.early_stop = False
+        
         os.makedirs(save_dir, exist_ok=True)
 
     def __call__(self, current_acc, model_state, epoch):
-        # Verifica se a acurácia atual é a melhor até agora
-        if current_acc > self.best_acc:
+        # Verifica se houve melhora significativa
+        if current_acc > (self.best_acc + self.min_delta):
             self.best_acc = current_acc
+            self.counter = 0
             path = os.path.join(self.save_dir, self.filename)
             torch.save(model_state, path)
-            print(f"Novo melhor modelo salvo  (Acc: {current_acc:.4f}) em {path}")
-            return True
-        return False
+            print(f" Época {epoch+1}: Novo melhor modelo! (Acc: {current_acc:.4f})")
+        else:
+            self.counter += 1
+            print(f" Época {epoch+1}: Sem melhora significativa. ({self.counter}/{self.patience})")
+            
+            if self.counter >= self.patience:
+                self.early_stop = True
+                print(" Early Stopping acionado! Encerrando treinamento.")
+        
+        return self.early_stop
 
 
 def train_lora_projection(epochs=10, batch_size=2, accumulation_steps=16):
@@ -56,8 +68,7 @@ def train_lora_projection(epochs=10, batch_size=2, accumulation_steps=16):
     train_dataloader, val_dataloader = create_all_dataloaders("F:/COYO/coyo/extracted", batch_size=batch_size, num_workers=4, t="train")
 
     global_step = 0 # Para o TensorBoard
-    
-    checkpoint_callback = ModelCheckpoint(save_dir="checkpoints", filename="best_aligner.pth")
+    controller = EarlyStopping(patience=5, min_delta=0.001)
 
     for epoch in range(epochs):
         aligner.train()
@@ -171,11 +182,16 @@ def train_lora_projection(epochs=10, batch_size=2, accumulation_steps=16):
         print(f"  Treino -> Loss: {avg_train_loss:.4f} | Acc: {avg_train_acc:.4f}")
         print(f"  Val    -> Loss: {avg_val_loss:.4f} | Acc: {avg_val_acc:.4f}")
         
-        # Passamos a acurácia de VALIDAÇÃO para decidir se salvamos
-        is_best = checkpoint_callback(avg_val_acc, aligner.state_dict(), epoch)
-        
-        # Salvar 
         torch.save(aligner.state_dict(), f"checkpoints/aligner_epoch_{epoch+1}.pth")
+        
+        
+        
+        # O controller decide se o treino deve parar
+        stop_now = controller(avg_val_acc, aligner.state_dict(), epoch)
+    
+        if stop_now:
+            break # Sai do loop de épocas
+        
 
     writer.close()
     print("Treino finalizado!")
@@ -188,7 +204,7 @@ if __name__ == "__main__":
     ACCUMULATION_STEPS = 8 # Batch Real = 4 * 8 = 32
 
     
-    print("--- Iniciando Pipeline de Treinamento SceneGraph ---")
+    print("--- Iniciando Pipeline de Treinamento da camada de projeção ---")
     
     try:
         # Chamada da função de treino

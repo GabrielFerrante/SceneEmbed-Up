@@ -1,6 +1,7 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 class AnyUpModel:
     def __init__(self, repo = 'wimmerth/anyup', model =  'anyup_multi_backbone', natten = True, device = 'cuda'):
@@ -14,12 +15,9 @@ class AnyUpModel:
         hr_features =  anyup(img_tensor, lr_features)
         return hr_features
 
-import torch
-import torch.nn.functional as F
-
 class AdaptiveConv(torch.nn.Module):
     """
-    Versão PyTorch puro do AdaptiveConv.
+    Versão PyTorch do AdaptiveConv.
     Realiza convolução pixel-a-pixel usando kernels dinâmicos.
     """
     def __init__(self, radius):
@@ -89,9 +87,7 @@ class JBULearnedRange(torch.nn.Module):
         GB, GC, GH, GW = x.shape
         proj_x = self.range_proj(x)
         proj_x_padded = F.pad(proj_x, pad=[self.radius] * 4, mode='reflect')
-        queries = torch.nn.Unfold(self.diameter)(proj_x_padded) \
-            .reshape((GB, self.key_dim, self.diameter * self.diameter, GH, GW)) \
-            .permute(0, 1, 3, 4, 2)
+        queries = torch.nn.Unfold(self.diameter)(proj_x_padded).reshape((GB, self.key_dim, self.diameter * self.diameter, GH, GW)).permute(0, 1, 3, 4, 2)
         pos_temp = self.range_temp.exp().clamp_min(1e-4).clamp_max(1e4)
         return F.softmax(pos_temp * torch.einsum("bchwp,bchw->bphw", queries, proj_x), dim=1)
 

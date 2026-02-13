@@ -1,12 +1,16 @@
 import torch
+import torchvision.transforms as transforms
 import torch.nn.functional as F
 from tqdm import tqdm
 import numpy as np
 from models.SG.projection import LoRACrossAttentionAligner, calculate_retrieval_score
 from models.encoders.dinov3_extrator import DinoSceneEncoder
 from models.encoders.qwen3_extrator import QwenSceneEmbedder
-from models.SG.generation import SceneGraphGenerator
+from models.SG.generation import SceneGraphGenerator, KnowledgeGraphGenerator, salvar_grafos_json
 from data.data_utils_pytorch import create_all_dataloaders
+import os
+import json
+from datetime import datetime
 
 class SceneGraphEvaluator:
     def __init__(self, generator, device="cuda"):
@@ -54,48 +58,72 @@ class SceneGraphEvaluator:
             results[f"Recall@{k}"] = correct.float().mean().item()
             
         return results
-
-    def evaluate_graph_structure(self, generated_graph, ground_truth_graph):
+    
+    def salvar_recall_results(recall_results, filename="recall_metrics.json", directory="results"):
         """
-        Compara o grafo gerado com um grafo de referência (GT).
-        Métricas: Precisão de Nós e Arestas.
+        Salva os resultados de Recall@K em um arquivo JSON.
         """
-        gen_nodes = set([n['label'] for n in generated_graph['nodes']])
-        gt_nodes = set(ground_truth_graph['nodes'])
+        if not os.path.exists(directory):
+            os.makedirs(directory)
+            
+        path = os.path.join(directory, filename)
         
-        # Precisão de Objetos (Nós)
-        hit_nodes = gen_nodes.intersection(gt_nodes)
-        node_precision = len(hit_nodes) / len(gen_nodes) if gen_nodes else 0
-        node_recall = len(hit_nodes) / len(gt_nodes) if gt_nodes else 0
-        
-        # Precisão de Relações (Arestas)
-        # Formato esperado da aresta: (sujeito, relação, objeto)
-        gen_edges = set([(e['subject'], e['relation'], e['object']) for e in generated_graph['edges']])
-        gt_edges = set(ground_truth_graph['edges'])
-        
-        hit_edges = gen_edges.intersection(gt_edges)
-        edge_precision = len(hit_edges) / len(gen_edges) if gen_edges else 0
-        
-        return {
-            "node_precision": node_precision,
-            "node_recall": node_recall,
-            "edge_precision": edge_precision,
-            "f1_score": 2 * (node_precision * node_recall) / (node_precision + node_recall + 1e-8)
+        # Prepara a estrutura com metadados
+        data_to_save = {
+            "timestamp": datetime.now().isoformat(),
+            "experiment_info": {
+                "model": "LoRA-Aligner-v1",
+                "visual_encoder": "DinoV3",
+                "text_encoder": "Qwen-7B-Embedder"
+            },
+            "metrics": recall_results  # Aqui entra o dicionário {Recall@1: x, Recall@5: y, ...}
         }
         
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(data_to_save, f, indent=4, ensure_ascii=False)
+        
+        print(f" Métricas de Recall salvas com sucesso em: {path}")
 
-# --- Exemplo de uso ---
+
+    def evaluate_compare_graphs(self, scene_g, kg_g ):
+        
+        """
+        Verifica se as labels físicas existem na base de conhecimento.
+        """
+        scene_labels = {n['label'] for n in scene_g['nodes']}
+        knowledge_labels = set(kg_g['entities'])
+        
+        # Quão bem o conhecimento cobre a cena?
+        coverage = len(scene_labels & knowledge_labels) / len(scene_labels) if scene_labels else 0
+        return {"semantic_coverage": coverage}
+    
+    
+
+def extrair_candidatos_llm(label_real, embedder):
+    """
+    Usa o Qwen para extrair apenas palavras-chave (objetos) da frase.
+    """
+    prompt = f"Extraia apenas os substantivos/objetos da frase: '{label_real}'. Responda apenas as palavras separadas por vírgula."
+    
+    # Chama o método de geração do seu embedder/model
+    inputs = embedder.tokenizer(prompt, return_tensors="pt").to(embedder.device)
+    outputs = embedder.model.generate(**inputs, max_new_tokens=20)
+    palavras = embedder.tokenizer.decode(outputs[0], skip_special_tokens=True)
+    
+    # Limpa a resposta: "homem, bicicleta, estrada" -> ["homem", "bicicleta", "estrada"]
+    candidatos = [p.strip().lower() for p in palavras.split(',') if len(p.strip()) > 1]
+    return candidatos
+
 if __name__ == "__main__":
-    import os
-    from data.data_utils_pytorch import create_dataloader
+    
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    # 1. Instanciar Encoders (Pesados)
+    #  Instanciar Encoders (Pesados)
     dino = DinoSceneEncoder(device=device)
     qwen = QwenSceneEmbedder(device=device)
 
-    # 2. Setup Aligner (Leve)
+    #  Setup Aligner (Leve)
     # Certifique-se que o visual_dim condiz com o encoder usado (768 para AnyUp/Dino-B)
     aligner = LoRACrossAttentionAligner(visual_dim=768, text_dim=4096)
     
@@ -108,16 +136,16 @@ if __name__ == "__main__":
 
     aligner.to(device).eval()
     
-    # 3. Gerador e Avaliador
-    generator = SceneGraphGenerator(
+    #  Gerador e Avaliador
+    generator_sg = SceneGraphGenerator(
         dino_encoder=dino, 
         qwen_embedder=qwen, 
         aligner=aligner, 
         threshold=0.3
     )
-    evaluator = SceneGraphEvaluator(generator)
+    evaluator = SceneGraphEvaluator(generator_sg)
     
-    # 4. Carregar Dataloader de Teste
+    #  Carregar Dataloader de Teste
     # Substitua pelo caminho correto do seu conjunto de teste
     test_dataloader = create_all_dataloaders("F:/COYO/coyo/extracted", batch_size=2, num_workers=4, t="test")
 
@@ -126,24 +154,64 @@ if __name__ == "__main__":
     # A. Métrica de Projeção (Recall Global)
     print("\n--- Avaliando Alinhamento (Recall@K) ---")
     recall_results = evaluator.evaluate_projection(test_dataloader, k_values=[1, 5, 10])
+    for k, v in recall_results.items():
+        print(f"{k}: {v:.4f}")
     print(f"Resultados de Busca: {recall_results}")
-
-    # B. Exemplo Qualitativo e Espacial (mIoU)
-    # Vamos pegar um batch do test_dataloader para um teste visual
-    print("\n--- Teste Qualitativo em Imagem Real ---")
-    images, texts = next(iter(test_dataloader))
-    img_teste = images[0]  # Pega a primeira imagem do batch
-    label_teste = texts[0] # Texto real da imagem
+    # SALVA NO DISCO
+    evaluator.salvar_recall_results(recall_results)
     
-    # Simulamos uma lista de candidatos incluindo o real para ver se o modelo acha
-    candidatos = [label_teste, "carro", "árvore", "pessoa"] 
-    relacoes = ["perto de", "em cima de"]
-    
-    graph = generator.generate(img_teste, candidatos, relacoes)
-    
-    print(f"Grafo Gerado para '{label_teste}':")
-    print(f"  Nós Detectados: {[n['label'] for n in graph['nodes']]}")
-    print(f"  Relações: {graph['edges']}")
+    print("\n Iniciando Processamento do Dataset de Teste...")
 
+    # Gerador de Grafo de Conhecimento (usa o Qwen para fatos)
+    generator_kg = KnowledgeGraphGenerator(
+        qwen_model=qwen.model, 
+        qwen_tokenizer=qwen.tokenizer
+    )
 
-    print("\n Avaliação finalizada.")
+    # Listas para métricas globais
+    all_coverages = []
+
+    try:
+        # Iterar pelo dataloader de teste
+        # Assumindo batch_size=1 para teste qualitativo ou ajustando o loop interno
+        for batch_idx, (images, texts) in enumerate(tqdm(test_dataloader, desc="Processando Teste")):
+            
+            # Processar cada imagem do batch
+            for i, img_tensor in enumerate(images):
+                # Converter tensor para PIL (necessário para o generator.generate)
+                # Dependendo do seu transform, pode precisar de denormalização
+                img_pil = transforms.ToPILImage()(img_tensor.cpu())
+                
+                # Label real do dataset (ground truth)
+                label_real = texts[i]
+                
+                candidatos_dinamicos = extrair_candidatos_llm(label_real, qwen) 
+    
+                # Adicione categorias genéricas fixas para dar "escolha" ao Aligner
+                lista_candidatos = list(set(candidatos_dinamicos + ["person", "vehicle", "object"]))
+                
+                # Gerar SG com a lista refinada
+                
+                sg_result = generator_sg.generate(img_pil, lista_candidatos, ["near", "mounted on"])
+                
+                
+                # 2. Gerar KG (Semântica)
+                kg_result = generator_kg.generate_from_scene(sg_result)
+                
+                # 3. Comparar Grafos
+                comparativo = evaluator.evaluate_compare_graphs(sg_result, kg_result)
+                all_coverages.append(comparativo['semantic_coverage'])
+                
+                # 4. Gravar JSON
+                # Nomeamos o arquivo com o índice do batch e da imagem
+                nome_arquivo = f"resultado_batch{batch_idx}_img{i}.json"
+                salvar_grafos_json(sg_result, kg_result, comparativo, filename=nome_arquivo)
+
+        # Métricas Finais do Dataset
+        media_cobertura = sum(all_coverages) / len(all_coverages) if all_coverages else 0
+        print(f"\n Teste Finalizado!")
+        print(f" Cobertura Semântica Média no Dataset: {media_cobertura:.2%}")
+        print(f" Todos os grafos foram salvos na pasta 'results/'")
+
+    except Exception as e:
+        print(f" Erro durante o processamento do dataset: {e}")

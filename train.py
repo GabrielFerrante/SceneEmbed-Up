@@ -14,6 +14,23 @@ from models.encoders.qwen3_extrator import QwenSceneEmbedder
 from data.data_utils_pytorch import create_all_dataloaders
 
 
+class ModelCheckpoint:
+    def __init__(self, save_dir="checkpoints", filename="best_aligner.pth"):
+        self.save_dir = save_dir
+        self.filename = filename
+        self.best_acc = 0.0
+        os.makedirs(save_dir, exist_ok=True)
+
+    def __call__(self, current_acc, model_state, epoch):
+        # Verifica se a acurácia atual é a melhor até agora
+        if current_acc > self.best_acc:
+            self.best_acc = current_acc
+            path = os.path.join(self.save_dir, self.filename)
+            torch.save(model_state, path)
+            print(f"Novo melhor modelo salvo  (Acc: {current_acc:.4f}) em {path}")
+            return True
+        return False
+
 
 def train_lora_projection(epochs=10, batch_size=2, accumulation_steps=16):
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -39,6 +56,8 @@ def train_lora_projection(epochs=10, batch_size=2, accumulation_steps=16):
     train_dataloader, val_dataloader = create_all_dataloaders("F:/COYO/coyo/extracted", batch_size=batch_size, num_workers=4, t="train")
 
     global_step = 0 # Para o TensorBoard
+    
+    checkpoint_callback = ModelCheckpoint(save_dir="checkpoints", filename="best_aligner.pth")
 
     for epoch in range(epochs):
         aligner.train()
@@ -151,6 +170,9 @@ def train_lora_projection(epochs=10, batch_size=2, accumulation_steps=16):
         print(f"Época {epoch+1}:")
         print(f"  Treino -> Loss: {avg_train_loss:.4f} | Acc: {avg_train_acc:.4f}")
         print(f"  Val    -> Loss: {avg_val_loss:.4f} | Acc: {avg_val_acc:.4f}")
+        
+        # Passamos a acurácia de VALIDAÇÃO para decidir se salvamos
+        is_best = checkpoint_callback(avg_val_acc, aligner.state_dict(), epoch)
         
         # Salvar 
         torch.save(aligner.state_dict(), f"checkpoints/aligner_epoch_{epoch+1}.pth")

@@ -72,14 +72,14 @@ class DinoSceneEncoder:
 
 # Exemplo de uso:
 
-encoder = DinoSceneEncoder()
+#encoder = DinoSceneEncoder()
 
-url = "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/pipeline-cat-chonk.jpeg"
-image = load_image(url)
+#url = "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/pipeline-cat-chonk.jpeg"
+#image = load_image(url)
 
-cls_feat, spatial_feats = encoder.extract_features(image)
-print(f"global:{cls_feat.shape} ")
-print(f"local: {spatial_feats.shape}")
+#cls_feat, spatial_feats = encoder.extract_features(image)
+#print(f"global:{cls_feat.shape} ")
+#print(f"local: {spatial_feats.shape}")
 
 
 """

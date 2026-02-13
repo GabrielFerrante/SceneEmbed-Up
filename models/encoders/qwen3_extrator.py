@@ -7,7 +7,6 @@ class QwenSceneEmbedder:
     def __init__(self, model_id='Qwen/Qwen3-Embedding-8B', device=None):
         self.device = device if device else ("cuda" if torch.cuda.is_available() else "cpu")
         
-        # Usamos bfloat16 se a GPU suportar (A100, H100, RTX 30/40), senão float16
         self.dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
         if "cpu" in self.device: self.dtype = torch.float32
 
@@ -67,6 +66,6 @@ class QwenSceneEmbedder:
     
 # Exemplo de uso em outro arquivo:
 # from qwen_module import QwenSceneEmbedder
-embedder = QwenSceneEmbedder()
-vecs = embedder.embed_components(['black cat', 'on top of'])
-print(vecs.shape)
+#embedder = QwenSceneEmbedder()
+#vecs = embedder.embed_components(['black cat', 'on top of'])
+#print(vecs.shape)

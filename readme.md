@@ -1,28 +1,19 @@
 # SceneEmbed-UP
-Este repositório implementa uma arquitetura avançada para Geração de Grafos de Cena (Scene Graphs), otimizada para imagens de ultra-alta resolução através da integração de encoders visuais de última geração e LLMs de embedding.
-
-## Método
-A solução resolve o desafio de processar detalhes minúsculos em imagens grandes sem estourar a memória de vídeo (VRAM), utilizando uma técnica de Projeção via Cross-Attention com Adaptadores LoRA.
+Este repositório implementa uma arquitetura avançada para Geração de Grafos de Cena (Scene Graphs), otimizada para imagens de ultra-alta resolução através da integração de encoders visuais e de embeddings. Objetivo é criar grafos de recuperação de imagens.
 
 **Arquitetura**
 
-* Visual Backbone (DINOv3): Utilizamos o DINOv3 para extração de features ricas. Aplicamos os upsamplers AnyUp e FeatUp para elevar a resolução dos mapas de features. Isso permite que o modelo "enxergue" objetos que desapareceriam em resoluções padrão (256x256).
+O treinamento do sistema de alinhamento multimodal baseia-se em uma arquitetura de extração hierárquica e refinamento adaptativo, projetada para processar dados de alta fidelidade com eficiência computacional. O pipeline inicia-se com a extração de características visuais através do backbone **DINOv3** (https://arxiv.org/abs/2508.10104), que, integrado a um upsampler (**AnyUp** (https://arxiv.org/abs/2510.12764) ou **FeatUp** (https://arxiv.org/abs/2403.10516)), gera mapas de características locais de alta resolução e tokens globais semanticamente ricos. Simultaneamente, as descrições textuais são processadas pelo modelo **Qwen3-Embeddings** (https://arxiv.org/abs/2506.05176), resultando em vetores de texto de 4096 dimensões que servem como âncoras semânticas. Para viabilizar o processamento de mapas (tensores) de características densos $(768 \times 224 \times 224)$ (65K tokens) sem exceder os limites de memória de vídeo (VRAM), aplica-se uma camada de Adaptive Average Pooling sobre as características locais, reduzindo a dimensionalidade espacial para uma grade de $32 \times 32$ (1024 tokens) sem sacrificar a densidade de informação necessária para o alinhamento. O componente central, o LoRACrossAttentionAligner, opera através de uma projeção visual base congelada suplementada por camadas LoRA, que permitem o ajuste fino e eficiente dos parâmetros visuais para o domínio do texto. O mecanismo de Cross-Attention utiliza os embeddings do Qwen como query para interagir com as características visuais projetadas (key e value), forçando o modelo a filtrar e alinhar as informações visuais mais relevantes para cada termo textual. Todo o processo é otimizado através de uma perda contrastiva bidirecional (CLIP Loss), empregando precisão mista (BFloat16) para acelerar a convergência e um sistema de Early Stopping baseado na loss de validação para garantir a máxima generalização do modelo final.
 
-* Semantic Embedding (Qwen3-8B): O Qwen3-Embedding é utilizado para converter labels de objetos e relações em vetores semânticos de alta dimensão ($4096$). As descrições são processadas com instruções específicas para tarefas de visão computacional.
+**Dataset utilizado**
 
-* LoRA Cross-Attention Aligner: Em vez de uma projeção linear simples, implementamos uma camada de Cross-Attention.
+* COYO-700M (https://github.com/kakaobrain/coyo-dataset)
+    - 1M Treino
+    - 10% Validação
+    - 1% Teste
 
-    - Mecânica: O texto (Query) busca informações nos patches da imagem (Key/Value). Isso reduz a complexidade computacional, focando apenas nos pixels relevantes para cada objeto do grafo.
-
-    - Eficiência: Utilizamos LoRA (Low-Rank Adaptation) para treinar as matrizes de projeção, permitindo um ajuste fino leve e rápido, mantendo os modelos base congelados.
-
-**Dataset**
-
-* COYO-700M como dataset de treino, validação e teste (70% | 20% | 10%)
-
-**Tecnologias**
+**Frameworks**
  * Pytorch
  * image2dataset
- * Python
  * Anaconda
  * HuggingFace models

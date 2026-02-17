@@ -158,12 +158,12 @@ def train_lora_projection(epochs=10, batch_size=2, accumulation_steps=16):
                     preds = torch.argmax(logits, dim=1)
                     acc = (preds == labels).float().mean()
 
-            print(f"Shapes -> Visual: {v_norm.shape}, Text: {t_norm.shape}")
-            print(f"Logits Matrix: \n{logits}") 
+            print(f"Shapes -> Visual: {v_norm.shape}, Text: {t_norm.shape}\n")
+            print(f"Logits Matrix: {logits}\n") 
             print(f"Labels: {labels}")
 
             # Se v_norm e t_norm forem iguais, isso aqui vai dar quase 1.0:
-            print(f"Cosine Similarity (primeiro par): {torch.dot(v_norm[0], t_norm[0])}")
+            print(f"Cosine Similarity (primeiro par): {torch.dot(v_norm[0], t_norm[0])}\n")
             
             # D. Backward
             loss.backward()

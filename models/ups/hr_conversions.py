@@ -9,10 +9,10 @@ class AnyUpModel:
         self.repo = repo
         self.model = model
         self.device = device
+        self.torch_hub = torch.hub.load(self.repo, self.model, use_natten=self.natten).to(self.device)
         
     def up(self, img_tensor, lr_features):
-        anyup = torch.hub.load(self.repo, self.model, use_natten=self.natten).to(self.device)
-        hr_features =  anyup(img_tensor, lr_features)
+        hr_features =  self.torch_hub(img_tensor, lr_features, output_size=(224, 224))
         return hr_features
 
 class AdaptiveConv(torch.nn.Module):

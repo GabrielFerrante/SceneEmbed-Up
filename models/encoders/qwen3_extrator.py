@@ -7,14 +7,13 @@ class QwenSceneEmbedder:
     def __init__(self, model_id='Qwen/Qwen3-Embedding-8B', device=None):
         self.device = device if device else ("cuda" if torch.cuda.is_available() else "cpu")
         
-        self.dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-        if "cpu" in self.device: self.dtype = torch.float32
+        self.dtype = torch.bfloat16
 
         print(f"Loading Qwen3 Embedding model on {self.device} em {self.dtype}...")
         self.tokenizer = AutoTokenizer.from_pretrained(model_id, padding_side='left')
         self.model = AutoModel.from_pretrained(
             model_id, 
-            torch_dtype=self.dtype,
+            dtype=self.dtype,
             device_map="cuda"
         ).to(self.device)
         
@@ -27,7 +26,7 @@ class QwenSceneEmbedder:
         batch_size = last_hidden_states.shape[0]
         return last_hidden_states[torch.arange(batch_size, device=last_hidden_states.device), sequence_lengths]
 
-    @torch.inference_mode()
+    @torch.no_grad()
     def embed_components(self, batch_texts: list[list[str]], max_length=512, normalize=True) -> Tensor:
         """
         Args:
@@ -57,15 +56,38 @@ class QwenSceneEmbedder:
         # 4. Pooling
         embeddings = self._last_token_pool(outputs.last_hidden_state, batch_dict['attention_mask'])
         
-        if normalize:
-            embeddings = F.normalize(embeddings, p=2, dim=-1)
-            
-        # 5. RESHAPE: De [Batch*N_textos, 4096] para [Batch, N_textos, 4096]
-        return embeddings.view(batch_size, n_texts_per_batch, -1)
-    
+        if embeddings.dim() == 2:
+            return embeddings.float()
+
+        # 4. Preparação da Máscara
+        attention_mask = batch_dict['attention_mask'] # Shape: [61, 19]
+        
+        # Expandimos a máscara para bater com o shape do embedding [61, 19, 4096]
+        # Usamos o None (ou unsqueeze) para alinhar as dimensões
+        mask_expanded = attention_mask.unsqueeze(-1).expand_as(embeddings).float()
+        
+        # 5. Mean Pooling Manual e Seguro
+        # Somamos os embeddings onde a máscara é 1
+        sum_embeddings = torch.sum(embeddings * mask_expanded, dim=1)
+        
+        # Somamos a máscara para saber por quanto dividir em cada sequência
+        sum_mask = torch.sum(mask_expanded, dim=1)
+        
+        # Evitamos divisão por zero
+        sum_mask = torch.clamp(sum_mask, min=1e-9)
+        
+        mean_pooled = sum_embeddings / sum_mask
+        
+        # O resultado agora é garantidamente [61, 4096]
+        return mean_pooled.float()
+        
     
 # Exemplo de uso em outro arquivo:
-# from qwen_module import QwenSceneEmbedder
+#from qwen_module import QwenSceneEmbedder
 #embedder = QwenSceneEmbedder()
 #vecs = embedder.embed_components(['black cat', 'on top of'])
 #print(vecs.shape)
+
+"""
+torch.size([2,9,4096])
+"""

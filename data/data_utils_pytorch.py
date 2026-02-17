@@ -5,7 +5,7 @@ from torch.utils.data import Dataset, DataLoader, random_split
 from torch.utils.data.dataloader import default_collate
 from torchvision import transforms
 from PIL import Image
-
+import h5py
 #NOTA: FOI CRIADO OUTRO ENV PARA EXEXUTAR A EXTRAÇÃO DOS DADOS
 
 def get_transforms(image_size=256):
@@ -13,12 +13,8 @@ def get_transforms(image_size=256):
     Define o pipeline de pré-processamento da imagem.
     """
     return transforms.Compose([
-        transforms.Resize((image_size, image_size)), # Garante tamanho fixo
         transforms.ToTensor(),
-        transforms.Normalize(
-            mean=[0.485, 0.456, 0.406],  # Padrão ImageNet
-            std=[0.229, 0.224, 0.225]
-        ),
+        transforms.Resize((image_size, image_size)), # Garante tamanho fixo
     ])
     
 class CoyoCollate:
@@ -126,8 +122,43 @@ class CoyoExtractedDataset(Dataset):
         
         # Retorna o par
         return image, caption
+    
+class ShardedH5Dataset(torch.utils.data.Dataset):
+    def __init__(self, folder_path):
+        # O padrão **/*.h5 procura em todas as subpastas
+        search_pattern = os.path.join(folder_path, "**", "*.h5")
+        self.files = sorted(glob.glob(search_pattern, recursive=True))
+        
+        if len(self.files) == 0:
+            raise RuntimeError(f"Nenhum ficheiro .h5 encontrado em {folder_path}")
 
-def create_all_dataloaders(
+    def __len__(self):
+        return len(self.files)
+
+    def __getitem__(self, idx):
+        file_path = self.files[idx]
+        
+        # Tentamos abrir o ficheiro. Se falhar (ex: ficheiro corrompido), 
+        # podemos capturar o erro aqui.
+        try:
+            with h5py.File(file_path, 'r') as f:
+                # Carregar tensores
+                v_global = torch.from_numpy(f['visual_global'][:]).float()
+                
+                # Chave dinâmica para AnyUp ou FeatUp
+                v_local_key = 'visual_local' if 'visual_local' in f else 'visual_feats'
+                v_local = torch.from_numpy(f[v_local_key][:]).float()
+                
+                t_feat = torch.from_numpy(f['text_feats'][:]).float()
+                
+            return v_global, v_local, t_feat
+            
+        except Exception as e:
+            print(f"Erro ao ler {file_path}: {e}")
+            # Retorna o próximo item se houver erro (estratégia simples de fallback)
+            return self.__getitem__((idx + 1) % len(self.files))
+
+def create_all_dataloaders( #USAR SE TIVER MEMÓRIA VRAM O SUFICIENTE
     root_dir, 
     batch_size=64, 
     image_size=256, 
@@ -147,15 +178,21 @@ def create_all_dataloaders(
     total_size = len(full_dataset)
     collate_fn = CoyoCollate(tokenizer=None, max_length=77)
     
-    #  Calcula os tamanhos das divisões (70/20/10)
-    train_size = int(0.7 * total_size)
-    val_size = int(0.2 * total_size)
-    test_size = total_size - train_size - val_size
+   # 1. Definir os tamanhos das fatias desejadas
+    train_size = int(100000)
+    val_size   = int(0.10 * total_size)
+    test_size  = int(0.01 * total_size)
     
+    # 2. Calcular o resto (74% que não serão usados)
+    unused_size = total_size - (train_size + val_size + test_size)
+    
+    # 3. Realizar o split com a lista completa que soma 100%
     generator = torch.Generator().manual_seed(42)
-    train_dataset, val_dataset, test_dataset = random_split(
+    
+    # Criamos 4 divisões, mas ignoramos a última
+    train_dataset, val_dataset, test_dataset, _ = random_split(
         full_dataset, 
-        [train_size, val_size, test_size],
+        [train_size, val_size, test_size, unused_size],
         generator=generator
     )
     
@@ -178,12 +215,15 @@ def create_all_dataloaders(
         test_dataset, batch_size=batch_size, shuffle=False, 
         num_workers=num_workers, collate_fn=collate_fn, pin_memory=True
     )
+    
     if t == "all":
         return train_loader, val_loader, test_loader
     elif t == "train":
         return train_loader, val_loader
     elif t == "test":
         return test_loader
+    
+
 
 # --- TESTE RÁPIDO ---
 if __name__ == "__main__":
@@ -244,3 +284,33 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
         
+"""
+Dataset carregado! Total de imagens encontradas: 7794796
+Divisão concluída:
+  Treino: 100000 imagens
+  Validação: 779479 imagens
+  Teste: 77947 imagens
+
+==============================
+INICIANDO TESTE DOS LOADERS
+==============================
+
+--- Testando Loader: TREINO ---
+  [OK] Imagens Shape: torch.Size([4, 3, 256, 256])
+  [OK] Texto Raw Detectado. Quantidade: 4
+  [OK] Exemplo de Legenda: Busseto Diced Pancetta, 5 Oz (Pack of 12...
+
+--- Testando Loader: VALIDAÇÃO ---
+  [OK] Imagens Shape: torch.Size([4, 3, 256, 256])
+  [OK] Texto Raw Detectado. Quantidade: 4
+  [OK] Exemplo de Legenda: Inspirierende Designs für kleines Badezimmer umges...
+
+--- Testando Loader: TESTE ---
+  [OK] Imagens Shape: torch.Size([4, 3, 256, 256])
+  [OK] Texto Raw Detectado. Quantidade: 4
+  [OK] Exemplo de Legenda: Sunset Edition by Yoskay Yamamoto Limited Mighty J...
+
+==============================
+TESTE FINALIZADO COM SUCESSO!
+==============================
+"""

@@ -18,35 +18,34 @@ class EarlyStopping:
         self.save_dir = save_dir
         self.filename = filename
         self.patience = patience      # Quantas épocas esperar sem melhora
-        self.min_delta = min_delta    # Mudança mínima para considerar uma melhora
-        self.best_acc = 0.0
+        self.min_delta = min_delta    # Redução mínima necessária para considerar uma melhora
+        self.best_loss = float('inf') # Inicializado com infinito para qualquer loss ser menor
         self.counter = 0              # Contador de épocas sem melhora
         self.early_stop = False
         
         os.makedirs(save_dir, exist_ok=True)
 
-    def __call__(self, current_acc, model_state, epoch):
-        # Verifica se houve melhora significativa
-        if current_acc > (self.best_acc + self.min_delta):
-            self.best_acc = current_acc
+    def __call__(self, current_loss, model_state, epoch):
+        # Para a Loss, queremos que o valor atual seja MENOR que o melhor anterior menos o delta
+        if current_loss < (self.best_loss - self.min_delta):
+            self.best_loss = current_loss
             self.counter = 0
             path = os.path.join(self.save_dir, self.filename)
             torch.save(model_state, path)
-            print(f" Época {epoch+1}: Novo melhor modelo! (Acc: {current_acc:.4f})")
+            print(f" >>> Época {epoch+1}: Novo melhor modelo salvo! (Loss: {current_loss:.4f})")
         else:
             self.counter += 1
-            print(f" Época {epoch+1}: Sem melhora significativa. ({self.counter}/{self.patience})")
+            print(f" >>> Época {epoch+1}: Sem melhora na Loss. ({self.counter}/{self.patience})")
             
             if self.counter >= self.patience:
                 self.early_stop = True
-                print(" Early Stopping acionado! Encerrando treinamento.")
+                print(" !!! Early Stopping acionado! Encerrando treinamento.")
         
         return self.early_stop
 
 
 def train_lora_projection(epochs=10, batch_size=2, accumulation_steps=16):
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    scaler = torch.amp.GradScaler() 
 
     # 1. Configuração de Logs
     log_dir = os.path.join("logs", datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
@@ -64,11 +63,19 @@ def train_lora_projection(epochs=10, batch_size=2, accumulation_steps=16):
     
     trainable_params = [p for p in aligner.parameters() if p.requires_grad]
     optimizer = optim.AdamW(trainable_params, lr=1e-4, weight_decay=0.01)
-
-    train_dataloader, val_dataloader = create_all_dataloaders("F:/COYO/coyo/extracted", batch_size=batch_size, num_workers=4, t="train")
+    #SE TIVER MEMÓRIA
+    train_dataloader, val_dataloader = create_all_dataloaders("F:/COYO/coyo/extracted", batch_size=batch_size, num_workers=8, t="train")
+    #
+    #EMBEDDINGS JÁ CALCULADAS
+    #train_ds= H5EmbeddingDataset("F:/COYO/embeds/train_embeddings_anyup.h5")
+    #train_dataloader = DataLoader(train_ds, batch_size=16, shuffle=True, pin_memory=True)
+    #val_ds = H5EmbeddingDataset("F:/COYO/embeds/val_embeddings_anyup.h5")
+    #val_dataloader = DataLoader(val_ds, batch_size=16, shuffle=True, pin_memory=True)
+    
+    
 
     global_step = 0 # Para o TensorBoard
-    controller = EarlyStopping(patience=5, min_delta=0.001)
+    controller = EarlyStopping(val_loss, aligner.state_dict(), epoch)
 
     for epoch in range(epochs):
         aligner.train()
@@ -79,18 +86,54 @@ def train_lora_projection(epochs=10, batch_size=2, accumulation_steps=16):
         pbar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{epochs}")
         
         for i, (images, texts) in enumerate(pbar):
+            # A. Preparação dos Dados (Direto do HDF5 para a GPU)
+            # v_feat_h5 shape esperado: [B, C, H, W] (768, 224, 224)
+            # t_feat_h5 shape esperado: [B, 4096] ou [B, N, 4096]
+            
+            #v_feat_h5 = train_v_feat.to(device, non_blocking=True)
+            #t_feat_h5 = train_t_feat.to(device, non_blocking=True)
+
+            # Reformatar visual para o Aligner (Tokens: [B, Seq_Len, Dim])
+            # Flatten das dimensões espaciais (H, W) -> Seq_Len
+            #visual_input = v_feat_h5.flatten(2).transpose(1, 2).to(target_dtype)
+            
+            # O Qwen já foi processado pelo Mean Pooling, então garantimos que seja [B, 1, 4096]
+            # se o aligner esperar essa dimensão extra de sequência.
+            #if t_feat_h5.dim() == 2:
+            #    text_queries = t_feat_h5.unsqueeze(1).to(target_dtype)  
+            #else:
+            #    t_feat_h5.to(target_dtype)
+            
             with torch.no_grad():
                 features_list = []
                 for img in images:
-                    _, hr_feat = dino_encoder.extract_features(img) 
-                    features_list.append(hr_feat.reshape(1, hr_feat.shape[1], -1).transpose(1, 2))
+                    # 1. Extração: retorna [1, 768, 224, 224]
+                    _, hr_feat = dino_encoder.extract_features(img.unsqueeze(0).to("cuda")) 
+                    
+                    # 2. Pooling
+                    # Reduzimos aqui para 32x32
+                    hr_feat_small = torch.nn.functional.adaptive_avg_pool2d(hr_feat, (32, 32))
+                    
+                    # 3. Squeeze e Transpose: [1, 768, 32, 32] -> [768, 1024] -> [1024, 768]
+                    # Aqui removemos o batch do loop para achatar
+                    c, h, w = hr_feat_small.shape[1:]
+                    flat_feat = hr_feat_small.squeeze(0).reshape(c, -1).transpose(0, 1)
+                    
+                    features_list.append(flat_feat.unsqueeze(0))
                 
                 visual_input = torch.cat(features_list, dim=0).to(target_dtype)
                 formatted_texts = [[t] for t in texts]
                 text_queries = qwen_embedder.embed_components(formatted_texts, normalize=False)
+                if text_queries.dim() == 2:
+                    # Se for [B, Dim], transforma em [B, 1, Dim]
+                    text_queries = text_queries.unsqueeze(1)
+                elif text_queries.dim() == 3 and text_queries.size(0) != visual_input.size(0):
+                    # Se o Qwen retornou tudo colapsado [Total_Componentes, Seq, Dim], 
+                    # reorganize para bater com o batch_size do visual
+                    text_queries = text_queries.view(visual_input.size(0), -1, text_queries.size(-1))
 
             # B. Forward com Autocast
-            with torch.amp.autocast(device_type='cuda', dtype=target_dtype):
+            with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16):
                 visual_refined = aligner(visual_input, text_queries) 
                 visual_projected = visual_refined.squeeze(1) 
                 text_target = text_queries.squeeze(1)
@@ -109,25 +152,29 @@ def train_lora_projection(epochs=10, batch_size=2, accumulation_steps=16):
                 loss_t = F.cross_entropy(logits.T, labels)
                 loss = (loss_v + loss_t) / 2
                 
+                
                 # Métrica: Acurácia do Batch (Quantos itens a diagonal é o maior valor)
                 with torch.no_grad():
                     preds = torch.argmax(logits, dim=1)
                     acc = (preds == labels).float().mean()
 
-                loss_scaled = loss / accumulation_steps
+            print(f"Shapes -> Visual: {v_norm.shape}, Text: {t_norm.shape}")
+            print(f"Logits Matrix: \n{logits}") 
+            print(f"Labels: {labels}")
 
+            # Se v_norm e t_norm forem iguais, isso aqui vai dar quase 1.0:
+            print(f"Cosine Similarity (primeiro par): {torch.dot(v_norm[0], t_norm[0])}")
+            
             # D. Backward
-            scaler.scale(loss_scaled).backward()
+            loss.backward()
 
-            if (i + 1) % accumulation_steps == 0:
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad()
+            optimizer.step()
+            optimizer.zero_grad()
                 
-                # Log no TensorBoard a cada step de otimização
-                writer.add_scalar("Loss/train_step", loss.item(), global_step)
-                writer.add_scalar("Acc/train_step", acc.item(), global_step)
-                global_step += 1
+            # Log no TensorBoard a cada step de otimização
+            writer.add_scalar("Loss/train_step", loss.item(), global_step)
+            writer.add_scalar("Acc/train_step", acc.item(), global_step)
+            global_step += 1
 
             epoch_loss += loss.item() * accumulation_steps
             epoch_acc += acc.item()
@@ -140,10 +187,15 @@ def train_lora_projection(epochs=10, batch_size=2, accumulation_steps=16):
         print(f"Iniciando Validação Época {epoch+1}...")
         with torch.no_grad():
             for images, texts in tqdm(val_dataloader, desc="Validating"):
+                #v_feat_h5 = v_feat_h5.to(device)
+                #t_feat_h5 = t_feat_h5.to(device)
+
+                #visual_input = v_feat_h5.flatten(2).transpose(1, 2).to(target_dtype)
+                #text_queries = t_feat_h5.unsqueeze(1).to(target_dtype) if t_feat_h5.dim() == 2 else t_feat_h5.to(target_dtype)
                 # Extração (Mesma lógica do treino)
                 features_list = []
                 for img in images:
-                    _, hr_feat = dino_encoder.extract_features(img) 
+                    _, hr_feat = dino_encoder.extract_features(img.to("cuda")) 
                     features_list.append(hr_feat.reshape(1, hr_feat.shape[1], -1).transpose(1, 2))
                 
                 visual_input = torch.cat(features_list, dim=0).to(target_dtype)
@@ -187,7 +239,7 @@ def train_lora_projection(epochs=10, batch_size=2, accumulation_steps=16):
         
         
         # O controller decide se o treino deve parar
-        stop_now = controller(avg_val_acc, aligner.state_dict(), epoch)
+        stop_now = controller(avg_val_loss, aligner.state_dict(), epoch)
     
         if stop_now:
             break # Sai do loop de épocas
@@ -199,9 +251,9 @@ def train_lora_projection(epochs=10, batch_size=2, accumulation_steps=16):
 
 if __name__ == "__main__":
     # 1. Configurações de hiperparâmetros
-    EPOCHS = 10
-    BATCH_SIZE = 4 # Ajustado para segurança de memória com AnyUp
-    ACCUMULATION_STEPS = 8 # Batch Real = 4 * 8 = 32
+    EPOCHS = 100
+    BATCH_SIZE = 2 # Ajustado para segurança de memória com AnyUp
+    ACCUMULATION_STEPS = 2
 
     
     print("--- Iniciando Pipeline de Treinamento da camada de projeção ---")

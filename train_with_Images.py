@@ -44,7 +44,7 @@ class EarlyStopping:
         return self.early_stop
 
 
-def train_lora_projection(epochs=10, batch_size=2, accumulation_steps=16):
+def train_lora_projection(epochs=10, batch_size=2):
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # 1. Configuração de Logs
@@ -63,20 +63,17 @@ def train_lora_projection(epochs=10, batch_size=2, accumulation_steps=16):
     
     trainable_params = [p for p in aligner.parameters() if p.requires_grad]
     optimizer = optim.AdamW(trainable_params, lr=1e-4, weight_decay=0.01)
-    #SE TIVER MEMÓRIA
+
+
+
     train_dataloader, val_dataloader = create_all_dataloaders("F:/COYO/coyo/extracted", batch_size=batch_size, num_workers=8, t="train")
-    #
-    #EMBEDDINGS JÁ CALCULADAS
-    #train_ds= H5EmbeddingDataset("F:/COYO/embeds/train_embeddings_anyup.h5")
-    #train_dataloader = DataLoader(train_ds, batch_size=16, shuffle=True, pin_memory=True)
-    #val_ds = H5EmbeddingDataset("F:/COYO/embeds/val_embeddings_anyup.h5")
-    #val_dataloader = DataLoader(val_ds, batch_size=16, shuffle=True, pin_memory=True)
+
     
     
 
     global_step = 0 # Para o TensorBoard
-    controller = EarlyStopping(val_loss, aligner.state_dict(), epoch)
-
+    controller = EarlyStopping()
+    processed_samples = 0
     for epoch in range(epochs):
         aligner.train()
         epoch_loss = 0.0
@@ -84,25 +81,10 @@ def train_lora_projection(epochs=10, batch_size=2, accumulation_steps=16):
         
         optimizer.zero_grad()
         pbar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{epochs}")
+        val_loss, val_acc = 0.0, 0.0
+        
         
         for i, (images, texts) in enumerate(pbar):
-            # A. Preparação dos Dados (Direto do HDF5 para a GPU)
-            # v_feat_h5 shape esperado: [B, C, H, W] (768, 224, 224)
-            # t_feat_h5 shape esperado: [B, 4096] ou [B, N, 4096]
-            
-            #v_feat_h5 = train_v_feat.to(device, non_blocking=True)
-            #t_feat_h5 = train_t_feat.to(device, non_blocking=True)
-
-            # Reformatar visual para o Aligner (Tokens: [B, Seq_Len, Dim])
-            # Flatten das dimensões espaciais (H, W) -> Seq_Len
-            #visual_input = v_feat_h5.flatten(2).transpose(1, 2).to(target_dtype)
-            
-            # O Qwen já foi processado pelo Mean Pooling, então garantimos que seja [B, 1, 4096]
-            # se o aligner esperar essa dimensão extra de sequência.
-            #if t_feat_h5.dim() == 2:
-            #    text_queries = t_feat_h5.unsqueeze(1).to(target_dtype)  
-            #else:
-            #    t_feat_h5.to(target_dtype)
             
             with torch.no_grad():
                 features_list = []
@@ -154,9 +136,9 @@ def train_lora_projection(epochs=10, batch_size=2, accumulation_steps=16):
                 
                 
                 # Métrica: Acurácia do Batch (Quantos itens a diagonal é o maior valor)
-                with torch.no_grad():
-                    preds = torch.argmax(logits, dim=1)
-                    acc = (preds == labels).float().mean()
+            with torch.no_grad():
+                preds = torch.argmax(logits, dim=1)
+                acc = (preds == labels).float().mean()
 
             print(f"Shapes -> Visual: {v_norm.shape}, Text: {t_norm.shape}\n")
             print(f"Logits Matrix: {logits}\n") 
@@ -165,24 +147,29 @@ def train_lora_projection(epochs=10, batch_size=2, accumulation_steps=16):
             # Se v_norm e t_norm forem iguais, isso aqui vai dar quase 1.0:
             print(f"Cosine Similarity (primeiro par): {torch.dot(v_norm[0], t_norm[0])}\n")
             
-            # D. Backward
-            loss.backward()
-
-            optimizer.step()
-            optimizer.zero_grad()
+          
+            optimizer.zero_grad() # 1. Zera
+            loss.backward()      # 2. Calcula
+            optimizer.step()      # 3. Aplica
                 
-            # Log no TensorBoard a cada step de otimização
-            writer.add_scalar("Loss/train_step", loss.item(), global_step)
+               
+            writer.add_scalar("Loss/train_step", loss.item(), global_step) 
             writer.add_scalar("Acc/train_step", acc.item(), global_step)
             global_step += 1
 
-            epoch_loss += loss.item() * accumulation_steps
-            epoch_acc += acc.item()
-            pbar.set_postfix({'loss': loss.item(), 'acc': acc.item()})
-            
+            # 3. Métricas da Época (Usando a soma ponderada)
+            # Aqui usamos a loss "cheia" para ter a média real das imagens
+            epoch_loss += loss.item() * visual_input.size(0)
+            epoch_acc += acc.item() * visual_input.size(0)
+            processed_samples += visual_input.size(0)
+
+            # 4. Feedback visual
+            pbar.set_postfix({
+                'loss': f"{loss.item():.4f}", 
+                'acc': f"{acc.item():.2f}"
+            })
         #VALIDAÇÃO        
         aligner.eval()
-        val_loss, val_acc = 0.0, 0.0
         
         print(f"Iniciando Validação Época {epoch+1}...")
         with torch.no_grad():
@@ -220,8 +207,8 @@ def train_lora_projection(epochs=10, batch_size=2, accumulation_steps=16):
                 val_acc += acc.item()
 
         # --- LOGS FINAIS DA ÉPOCA ---
-        avg_train_loss = epoch_loss / len(train_dataloader)
-        avg_train_acc = epoch_acc / len(train_dataloader)
+        avg_train_loss = epoch_loss / processed_samples
+        avg_train_acc = epoch_acc / processed_samples
         avg_val_loss = val_loss / len(val_dataloader)
         avg_val_acc = val_acc / len(val_dataloader)
 
@@ -252,8 +239,7 @@ def train_lora_projection(epochs=10, batch_size=2, accumulation_steps=16):
 if __name__ == "__main__":
     # 1. Configurações de hiperparâmetros
     EPOCHS = 100
-    BATCH_SIZE = 2 # Ajustado para segurança de memória com AnyUp
-    ACCUMULATION_STEPS = 2
+    BATCH_SIZE = 4 # Ajustado para segurança de memória com AnyUp
 
     
     print("--- Iniciando Pipeline de Treinamento da camada de projeção ---")
@@ -263,7 +249,6 @@ if __name__ == "__main__":
         train_lora_projection( 
             epochs=EPOCHS,
             batch_size=BATCH_SIZE,
-            accumulation_steps=ACCUMULATION_STEPS
         )
     except Exception as e:
         print(f"Erro durante o treinamento: {e}")

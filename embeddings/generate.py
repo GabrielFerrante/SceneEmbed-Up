@@ -13,30 +13,56 @@ def export_embeddings(dataloader, dino, qwen, output_dir):
     os.makedirs(output_dir, exist_ok=True)
     
     idx = 0
-    samples_per_folder = 1000  # Limite de ficheiros por subpasta
+    samples_per_folder = 1000 
     
+    # Garantir que os modelos estão em eval e na GPU
+    dino.eval()
+    qwen.eval()
+
     with torch.no_grad():
-        for imgs, texts in tqdm(dataloader, desc=f"Exportando"):
+        for imgs, texts in tqdm(dataloader, desc="Exportando"):
+            # 1. Extração Visual (DinoV3)
+            # globais: [B, 768], locais: [B, 768, H, W]
             globais, locais = dino.extract_features(imgs.to("cuda"))
-            t_feat = qwen.embed_components(texts)
+            
+            # 2. Processamento Local (Igual ao seu treino)
+            # Reduz para 32x32 via pooling
+            locais_small = torch.nn.functional.adaptive_avg_pool2d(locais, (32, 32))
+            
+            # 3. Extração de Texto (Qwen)
+            # Formata textos como lista de listas para bater com a lógica interna
+            formatted_texts = [[t] for t in texts]
+            t_feat = qwen.embed_components(formatted_texts, normalize=False)
+            
+            # Garantir shape [B, 1, 4096] para o texto
+            if t_feat.dim() == 2:
+                t_feat = t_feat.unsqueeze(1)
 
             batch_size = imgs.shape[0]
             
             for b in range(batch_size):
-                # Cálculo da subpasta: 0, 1, 2...
                 folder_idx = str(idx // samples_per_folder).zfill(5)
                 target_folder = os.path.join(output_dir, folder_idx)
                 os.makedirs(target_folder, exist_ok=True)
                 
                 sample_filename = os.path.join(target_folder, f"sample_{idx}.h5")
                 
+                # --- PROCESSAMENTO DA FEATURE LOCAL POR AMOSTRA ---
+                # locais_small[b] tem shape [768, 32, 32]
+                feat_b = locais_small[b] 
+                c, h, w = feat_b.shape
+                # Achata (reshape) e Transpõe: [768, 1024] -> [1024, 768]
+                flat_feat = feat_b.reshape(c, -1).transpose(0, 1) 
+                
                 with h5py.File(sample_filename, 'w') as f:
-                    # Guardar features em float16 para poupar espaço
-                    f.create_dataset("visual_global", data=globais[b].cpu().numpy().astype('float16'), compression="gzip")
+                    # Guardamos a feature visual já pronta para o Aligner [1024, 768]
+                    f.create_dataset("visual_feats", data=flat_feat.cpu().numpy().astype('float16'), compression="gzip")
+                    
+                    # Guardamos a feature de texto [1, 4096]
                     f.create_dataset("text_feats", data=t_feat[b].cpu().numpy().astype('float16'), compression="gzip")
                     
-                    local_key = "visual_local" if dino.model_up == "anyup" else "visual_feats"
-                    f.create_dataset(local_key, data=locais[b].cpu().numpy().astype('float16'), compression="gzip")
+                    # Opcional: Guardar a global caso precise no futuro
+                    f.create_dataset("visual_global", data=globais[b].cpu().numpy().astype('float16'), compression="gzip")
                 
                 idx += 1
 
@@ -45,7 +71,7 @@ if __name__ == "__main__":
     qwen_embedder = QwenSceneEmbedder(device="cuda")
     
     # Criar dataloaders
-    train_dataloader, val_dataloader = create_all_dataloaders("F:/COYO/coyo/extracted", batch_size=2, num_workers=4, t="train")
+    train_dataloader, val_dataloader = create_all_dataloaders("F:/COYO/coyo/extracted", batch_size=4, num_workers=8, t="train")
     
     # Agora passamos DIRETÓRIOS em vez de caminhos de arquivo únicos
     export_embeddings(train_dataloader, dino_encoder, qwen_embedder, output_dir="F:/COYO/embeds/train_anyup")

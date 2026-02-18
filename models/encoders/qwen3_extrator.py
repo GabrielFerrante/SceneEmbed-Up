@@ -27,21 +27,22 @@ class QwenSceneEmbedder:
         return last_hidden_states[torch.arange(batch_size, device=last_hidden_states.device), sequence_lengths]
 
     @torch.no_grad()
-    def embed_components(self, batch_texts: list[list[str]], max_length=512, normalize=True) -> Tensor:
+    def embed_components(self, batch_texts: list[list[str]] | list[str], max_length=512, normalize=True) -> Tensor:
         """
-        Args:
-            batch_texts: Lista de listas, ex: [['gato', 'mesa'], ['cachorro', 'bola']]
-        Returns:
-            Tensor: [Batch, N_textos, 4096]
+        Returns: Tensor [Batch, N_textos, 4096]
         """
+        # 1. Normalização de Entrada: Garante que seja sempre lista de listas
+        if isinstance(batch_texts[0], str):
+            batch_texts = [batch_texts] # Transforma ['a', 'b'] em [['a', 'b']]
+            
         batch_size = len(batch_texts)
-        n_texts_per_batch = len(batch_texts[0]) # Assume que cada imagem tem o mesmo N de termos no batch
+        n_texts_per_batch = len(batch_texts[0]) 
         
-        # 1. Achata a lista de listas para processar tudo em um único forward do Qwen
+        # 2. Achata para processamento em massa
         flat_texts = [t for sublist in batch_texts for t in sublist]
         instructed_texts = [f'Instruct: {self.task_sg}\nQuery:{t}' for t in flat_texts]
         
-        # 2. Tokenização em massa
+        # 3. Tokenização e Forward
         batch_dict = self.tokenizer(
             instructed_texts, 
             padding=True, 
@@ -50,36 +51,25 @@ class QwenSceneEmbedder:
             return_tensors="pt"
         ).to(self.device)
 
-        # 3. Forward
-        outputs = self.model(**batch_dict)
+        with torch.no_grad():
+            outputs = self.model(**batch_dict)
+            
+        # 4. Pooling (Usando a sua lógica de Mean Pooling)
+        embeddings = outputs.last_hidden_state
+        mask_expanded = batch_dict['attention_mask'].unsqueeze(-1).expand_as(embeddings).float()
         
-        # 4. Pooling
-        embeddings = self._last_token_pool(outputs.last_hidden_state, batch_dict['attention_mask'])
-        
-        if embeddings.dim() == 2:
-            return embeddings.float()
-
-        # 4. Preparação da Máscara
-        attention_mask = batch_dict['attention_mask'] # Shape: [61, 19]
-        
-        # Expandimos a máscara para bater com o shape do embedding [61, 19, 4096]
-        # Usamos o None (ou unsqueeze) para alinhar as dimensões
-        mask_expanded = attention_mask.unsqueeze(-1).expand_as(embeddings).float()
-        
-        # 5. Mean Pooling Manual e Seguro
-        # Somamos os embeddings onde a máscara é 1
         sum_embeddings = torch.sum(embeddings * mask_expanded, dim=1)
-        
-        # Somamos a máscara para saber por quanto dividir em cada sequência
-        sum_mask = torch.sum(mask_expanded, dim=1)
-        
-        # Evitamos divisão por zero
-        sum_mask = torch.clamp(sum_mask, min=1e-9)
-        
+        sum_mask = torch.clamp(torch.sum(mask_expanded, dim=1), min=1e-9)
         mean_pooled = sum_embeddings / sum_mask
         
-        # O resultado agora é garantidamente [61, 4096]
-        return mean_pooled.float()
+        # 5. RESHAPE CRUCIAL: Volta para [B, N, 4096]
+        # Isso separa os textos de volta para suas respectivas imagens
+        final_embeddings = mean_pooled.view(batch_size, n_texts_per_batch, -1)
+        
+        if normalize:
+            final_embeddings = torch.nn.functional.normalize(final_embeddings, p=2, dim=-1)
+            
+        return final_embeddings.float()
         
     
 # Exemplo de uso em outro arquivo:

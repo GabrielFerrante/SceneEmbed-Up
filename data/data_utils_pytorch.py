@@ -142,16 +142,9 @@ class ShardedH5Dataset(torch.utils.data.Dataset):
         # podemos capturar o erro aqui.
         try:
             with h5py.File(file_path, 'r') as f:
-                # Carregar tensores
-                v_global = torch.from_numpy(f['visual_global'][:]).float()
-                
-                # Chave dinâmica para AnyUp ou FeatUp
-                v_local_key = 'visual_local' if 'visual_local' in f else 'visual_feats'
-                v_local = torch.from_numpy(f[v_local_key][:]).float()
-                
-                t_feat = torch.from_numpy(f['text_feats'][:]).float()
-                
-            return v_global, v_local, t_feat
+                visual_input = torch.from_numpy(f['visual_feats'][:]).to(torch.bfloat16)
+                text_queries = torch.from_numpy(f['text_feats'][:]).to(torch.bfloat16)
+            return visual_input, text_queries
             
         except Exception as e:
             print(f"Erro ao ler {file_path}: {e}")
@@ -160,9 +153,9 @@ class ShardedH5Dataset(torch.utils.data.Dataset):
 
 def create_all_dataloaders( #USAR SE TIVER MEMÓRIA VRAM O SUFICIENTE
     root_dir, 
-    batch_size=64, 
+    batch_size, 
     image_size=256, 
-    num_workers=4, 
+    num_workers=8, 
     shuffle=True,
     t = "all"
     
@@ -179,9 +172,9 @@ def create_all_dataloaders( #USAR SE TIVER MEMÓRIA VRAM O SUFICIENTE
     collate_fn = CoyoCollate(tokenizer=None, max_length=77)
     
    # 1. Definir os tamanhos das fatias desejadas
-    train_size = int(100000)
-    val_size   = int(0.10 * total_size)
-    test_size  = int(0.01 * total_size)
+    train_size = int(500000)
+    val_size   = int(10000)
+    test_size  = int(10000)
     
     # 2. Calcular o resto (74% que não serão usados)
     unused_size = total_size - (train_size + val_size + test_size)

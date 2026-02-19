@@ -145,8 +145,10 @@ def train_lora_projection(epochs=10, batch_size=2):
             print(f"Labels: {labels}")
 
             # Se v_norm e t_norm forem iguais, isso aqui vai dar quase 1.0:
+            #usar torch.dot só para verificação rápida de 1 batch
             print(f"Cosine Similarity (primeiro par): {torch.dot(v_norm[0], t_norm[0])}\n")
-            
+            #VERSÃO ATUALIZADA
+            #cosseno = torch.cosine_similarity(v_norm[0:1], t_norm[0:1], dim=1, eps=1e-6)
           
             optimizer.zero_grad() # 1. Zera
             loss.backward()      # 2. Calcula

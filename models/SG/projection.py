@@ -31,7 +31,7 @@ class LoRACrossAttentionAligner(nn.Module):
 
     def forward(self, hr_patches, text_queries):
         # A. Projeção Visual com LoRA
-        # [B, 658560, 4096]
+        # [B, 768, 4096]
         base_v = self.visual_proj(hr_patches)
         
         # Otimização de operação: (x @ A) @ B

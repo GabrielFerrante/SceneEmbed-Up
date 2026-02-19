@@ -16,8 +16,6 @@ def export_embeddings(dataloader, dino, qwen, output_dir):
     samples_per_folder = 1000 
     
     # Garantir que os modelos estão em eval e na GPU
-    dino.eval()
-    qwen.eval()
 
     with torch.no_grad():
         for imgs, texts in tqdm(dataloader, desc="Exportando"):
@@ -77,5 +75,3 @@ if __name__ == "__main__":
     export_embeddings(train_dataloader, dino_encoder, qwen_embedder, output_dir="F:/COYO/embeds/train_anyup")
     export_embeddings(val_dataloader, dino_encoder, qwen_embedder, output_dir="F:/COYO/embeds/val_anyup")
 
-    #export_embeddings(train_dataloader, "F:/COYO/embeds/train_embeddings_featup.h5")
-    #export_embeddings(val_dataloader, "F:/COYO/embeds/val_embeddings_featup.h5")

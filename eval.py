@@ -3,7 +3,7 @@ import torchvision.transforms as transforms
 import torch.nn.functional as F
 from tqdm import tqdm
 import numpy as np
-from models.SG.projection import LoRACrossAttentionAligner, calculate_retrieval_score
+from models.SG.projection import LoRACrossAttentionAligner
 from models.encoders.dinov3_extrator import DinoSceneEncoder
 from models.encoders.qwen3_extrator import QwenSceneEmbedder
 from models.SG.generation import SceneGraphGenerator, KnowledgeGraphGenerator, salvar_grafos_json
@@ -11,6 +11,7 @@ from data.data_utils_pytorch import create_all_dataloaders
 import os
 import json
 from datetime import datetime
+from collections import defaultdict
 
 class SceneGraphEvaluator:
     def __init__(self, generator, device="cuda"):
@@ -21,43 +22,155 @@ class SceneGraphEvaluator:
     @torch.no_grad()
     def evaluate_projection(self, dataloader, k_values=[1, 5, 10]):
         """
-        Calcula Recall@K para o alinhamento Imagem-Texto.
-        Indica se o Aligner coloca os pares corretos próximos no espaço latente.
+        Calcula Recall@K usando Similaridade Patch-Texto com Max Pooling.
         """
         self.generator.aligner.eval()
-        img_embeddings = []
-        text_embeddings = []
+        
+        all_image_patches = [] # Lista de tensores [N_patches, Dim]
+        all_text_queries = []  # Lista de tensores [Dim]
 
-        print("Extraindo Embeddings para Recall@K")
+        print("1. Extraindo Patches e Embeddings de Texto...")
         for images, texts in tqdm(dataloader):
-            # Features Visuais
-            _, hr_feat = self.generator.encoder.extract_features(images)
-            visual_input = hr_feat.view(hr_feat.size(0), hr_feat.size(1), -1).transpose(1, 2).to(self.dtype)
+            images = images.to(self.device)
             
-            # Embeddings de Texto (Targets)
+            # 1.1 - Extrair patches (DinoV3)
+            # hr_feat: [B, C, H, W] -> visual_input: [B, N_patches, 768]
+            _, hr_feat = self.generator.encoder.extract_features(images)
+            B, C, H, W = hr_feat.shape
+            visual_input = hr_feat.view(B, C, -1).transpose(1, 2).to(self.dtype)
+            
+            # Projetar patches para o espaço comum (usando o Aligner)
+            # Aqui assumimos que o aligner pode processar patches individualmente ou 
+            # extraímos a representação latente antes da agregação global.
+            # Se o aligner for Cross-Attention, passamos os patches por ele.
+            
+            # Embeddings de Texto
             formatted_texts = [[t] for t in texts]
             t_queries = self.generator.embedder.embed_components(formatted_texts)
-            
-            # Projeção (Alinhamento)
-            # Usamos o primeiro token de cada query como representação do par
-            v_refined = self.generator.aligner(visual_input, t_queries)
-            
-            img_embeddings.append(F.normalize(v_refined.squeeze(1), dim=-1).cpu())
-            text_embeddings.append(F.normalize(t_queries.squeeze(1), dim=-1).cpu())
+            t_queries = F.normalize(t_queries.squeeze(1), dim=-1) # [B, 4096]
 
-        # Matriz de Similaridade Global [N_total, N_total]
-        img_embeddings = torch.cat(img_embeddings, dim=0)
-        text_embeddings = torch.cat(text_embeddings, dim=0)
-        sim_matrix = torch.matmul(img_embeddings, text_embeddings.T)
+            # 1.2 - Para cada imagem no batch, guardamos seus patches normalizados
+            # Simulando a projeção dos patches para a dimensão do texto (4096)
+            # Se o seu aligner projeta a imagem inteira, adapte para projetar os patches.
+            for i in range(B):
+                # Armazena patches crus (sem passar no aligner ainda!)
+                patches_i = visual_input[i]  # [N_patches, 768] 
+                all_image_patches.append(patches_i.cpu())
+                
+                # Armazena embedding de texto normalizado
+                all_text_queries.append(t_queries[i].cpu())
 
+
+        num_samples = len(all_text_queries)
+        text_embeddings = torch.stack(all_text_queries) # [N_total, Dim]
+        
+        # 2. Rankear Imagens via Max Pooling de Similaridade
+        print(f"2. Calculando Matriz de Similaridade [Max Pooling] para {num_samples} amostras...")
+        sim_matrix = torch.zeros((num_samples, num_samples))
+
+        for i in range(num_samples):
+
+            patches_i = all_image_patches[i].to(self.device)  # [P, D]
+
+            # Expandimos patches para todos os textos
+            patches_batch = patches_i.unsqueeze(0).expand(
+                num_samples, -1, -1
+            )  # [N, P, D]
+
+            # Textos já estão em batch
+            text_batch = text_embeddings.unsqueeze(1)  # [N, 1, D]
+
+            #  Um único forward
+            p_refined, _ = self.generator.aligner(
+                patches_batch,   # [N, P, D]
+                text_batch       # [N, 1, D]
+            )
+
+            p_refined = F.normalize(p_refined, dim=-1)  # [N, P, D]
+
+            # Similaridade patch-text
+            sim = torch.matmul(
+                p_refined,
+                text_embeddings.unsqueeze(-1)  # [N, D, 1]
+            ).squeeze(-1)  # [N, P]
+
+            # max over patches
+            scores = sim.max(dim=1).values  # [N]
+
+            sim_matrix[i] = scores
+
+        # 3. Calcular Recall@K
         results = {}
+        labels = torch.arange(num_samples)
         for k in k_values:
-            # Verifica se a diagonal (índice i == j) está no top-k de cada linha
-            top_k = torch.topk(sim_matrix, k=k, dim=1).indices
-            correct = torch.any(top_k == torch.arange(len(sim_matrix)).unsqueeze(1), dim=1)
+            if k > num_samples: continue
+            
+            # Top-k índices ao longo da dimensão das imagens (rankeando quais imagens batem com o texto)
+            # Ou vice-versa. Aqui: para cada texto (coluna), quais as top-k imagens (linhas)?
+            _, top_k = torch.topk(sim_matrix, k=k, dim=0) # [k, N_total]
+            
+            # Verifica se o índice correto está no top-k
+            correct = torch.any(top_k == labels.unsqueeze(0), dim=0)
             results[f"Recall@{k}"] = correct.float().mean().item()
             
         return results
+    
+    def evaluate_expansion(scene_g, kg_g):
+        """
+        avalia o ganho semantico
+        """
+
+        scene_labels = {
+                n['label'].lower().strip()
+                for n in scene_g['nodes']
+        }
+        if not scene_labels:
+            return {"expansion_ratio": 0.0}
+        
+        kg_expanded_entities = {
+                edge['obj']
+                for edge in kg_g['factual_edges']
+        }
+
+        expansion = len(kg_expanded_entities) / len(scene_labels)
+        
+        
+
+        return {"expansion_ratio": expansion}
+    
+    def evaluate_mean_hypernym_count(scene_g, kg_g):
+        """
+        Calcula o número médio de hiperônimos (is_a)
+        por objeto da cena.
+        """
+
+        # Labels da cena normalizadas
+        scene_labels = {
+            n['label'].lower().strip()
+            for n in scene_g.get('nodes', [])
+        }
+
+        if not scene_labels:
+            return {"mean_hypernym_count": 0.0}
+
+        # Contador de hiperônimos por entidade
+        hypernym_counter = defaultdict(int)
+
+        for edge in kg_g.get('factual_edges', []):
+            sub = edge.get('sub', '').lower().strip()
+            rel = edge.get('rel', '').lower().strip()
+
+            if rel == "is_a" and sub in scene_labels:
+                hypernym_counter[sub] += 1
+
+        # Soma total de hiperônimos
+        total_hypernyms = sum(hypernym_counter.values())
+
+        mean_hypernyms = total_hypernyms / len(scene_labels)
+
+        return {
+            "mean_hypernym_count": mean_hypernyms
+        }
     
     def salvar_recall_results(recall_results, filename="recall_metrics.json", directory="results"):
         """
@@ -83,19 +196,6 @@ class SceneGraphEvaluator:
             json.dump(data_to_save, f, indent=4, ensure_ascii=False)
         
         print(f" Métricas de Recall salvas com sucesso em: {path}")
-
-
-    def evaluate_compare_graphs(self, scene_g, kg_g ):
-        
-        """
-        Verifica se as labels físicas existem na base de conhecimento.
-        """
-        scene_labels = {n['label'] for n in scene_g['nodes']}
-        knowledge_labels = set(kg_g['entities'])
-        
-        # Quão bem o conhecimento cobre a cena?
-        coverage = len(scene_labels & knowledge_labels) / len(scene_labels) if scene_labels else 0
-        return {"semantic_coverage": coverage}
     
     
 
@@ -103,12 +203,13 @@ def extrair_candidatos_llm(label_real, embedder):
     """
     Usa o Qwen para extrair apenas palavras-chave (objetos) da frase.
     """
-    prompt = f"Extraia apenas os substantivos/objetos da frase: '{label_real}'. Responda apenas as palavras separadas por vírgula."
+    prompt = f"Return only single-word concrete physical objects of {label_real}. No verbs. No adjectives. No determiners. Format: word1, word2, word3"
     
     # Chama o método de geração do seu embedder/model
     inputs = embedder.tokenizer(prompt, return_tensors="pt").to(embedder.device)
     outputs = embedder.model.generate(**inputs, max_new_tokens=20)
-    palavras = embedder.tokenizer.decode(outputs[0], skip_special_tokens=True)
+    input_len = inputs.input_ids.shape[1]
+    palavras = embedder.tokenizer.decode(outputs[0][input_len:], skip_special_tokens=True)
     
     # Limpa a resposta: "homem, bicicleta, estrada" -> ["homem", "bicicleta", "estrada"]
     candidatos = [p.strip().lower() for p in palavras.split(',') if len(p.strip()) > 1]

@@ -19,7 +19,8 @@ class LoRACrossAttentionAligner(nn.Module):
         self.cross_attn = nn.MultiheadAttention(
             embed_dim=text_dim, 
             num_heads=num_heads, 
-            batch_first=True
+            batch_first=True,
+            average_attn_weights=False
         )
         
         # 3. LoRA (A e B)
@@ -43,10 +44,11 @@ class LoRACrossAttentionAligner(nn.Module):
         attn_output, attn_weights = self.cross_attn(
             query=text_queries,       
             key=v_features,           
-            value=v_features          
+            value=v_features         
         )
-        
-        return attn_output # [Batch, N_termos, 4096]
+    
+        #output # [Batch, N_termos, 4096]
+        return attn_output, attn_weights 
 
 def calculate_retrieval_score(visual_aligned, text_embedding):
     """

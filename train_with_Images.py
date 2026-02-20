@@ -114,9 +114,12 @@ def train_lora_projection(epochs=10, batch_size=2):
                     # reorganize para bater com o batch_size do visual
                     text_queries = text_queries.view(visual_input.size(0), -1, text_queries.size(-1))
 
-            # B. Forward com Autocast
+            lambda_entropy = 0.01 
+
             with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16):
-                visual_refined = aligner(visual_input, text_queries) 
+                # 1. Forward com retorno dos pesos de atenção
+                visual_refined, attn_weights = aligner(visual_input, text_queries) 
+                
                 visual_projected = visual_refined.squeeze(1) 
                 text_target = text_queries.squeeze(1)
 
@@ -129,35 +132,45 @@ def train_lora_projection(epochs=10, batch_size=2):
                 current_batch_size = visual_projected.size(0)
                 labels = torch.arange(current_batch_size, device=device)
                 
-                # C. Cálculo das Métricas
+                # 2. Perda Contrastiva (CLIP-style)
                 loss_v = F.cross_entropy(logits, labels)
                 loss_t = F.cross_entropy(logits.T, labels)
-                loss = (loss_v + loss_t) / 2
+                contrastive_loss = (loss_v + loss_t) / 2
                 
+                # --- INÍCIO DA REGULARIZAÇÃO DA ENTROPIA ---
+                # attn_weights shape esperado: [Batch, Num_Queries, Num_Patches]
+                # Adicionamos um epsilon (1e-8) para evitar log(0)
+                entropy = -torch.sum(attn_weights * torch.log(attn_weights + 1e-8), dim=-1)
+                mean_entropy = entropy.mean()
                 
-                # Métrica: Acurácia do Batch (Quantos itens a diagonal é o maior valor)
-            with torch.no_grad():
-                preds = torch.argmax(logits, dim=1)
-                acc = (preds == labels).float().mean()
+                # Perda Total = Contraste + (Lambda * Entropia)
+                # Minimizar a entropia força a atenção a ser mais "focada" (spiky)
+                
+                target_entropy = 2.5  # exemplo
+                entropy_reg = (mean_entropy - target_entropy) ** 2
+                loss = contrastive_loss + lambda_entropy * entropy_reg
+                # --- FIM DA REGULARIZAÇÃO ---
 
-            print(f"Shapes -> Visual: {v_norm.shape}, Text: {t_norm.shape}\n")
-            print(f"Logits Matrix: {logits}\n") 
-            print(f"Labels: {labels}")
+                # C. Cálculo das Métricas (sem gradiente)
+                with torch.no_grad():
+                    preds = torch.argmax(logits, dim=1)
+                    acc = (preds == labels).float().mean()
 
-            # Se v_norm e t_norm forem iguais, isso aqui vai dar quase 1.0:
-            #usar torch.dot só para verificação rápida de 1 batch
-            print(f"Cosine Similarity (primeiro par): {torch.dot(v_norm[0], t_norm[0])}\n")
-            #VERSÃO ATUALIZADA
-            #cosseno = torch.cosine_similarity(v_norm[0:1], t_norm[0:1], dim=1, eps=1e-6)
-          
-            optimizer.zero_grad() # 1. Zera
-            loss.backward()      # 2. Calcula
-            optimizer.step()      # 3. Aplica
+                # Log das métricas para monitoramento
+                if global_step % 10 == 0:
+                    print(f"Loss: {loss.item():.4f} | Entropy: {mean_entropy.item():.4f} | Acc: {acc.item():.2f}")
+
+                optimizer.zero_grad() 
+                loss.backward()      
+                optimizer.step()      
                 
-               
-            writer.add_scalar("Loss/train_step", loss.item(), global_step) 
-            writer.add_scalar("Acc/train_step", acc.item(), global_step)
-            global_step += 1
+                # Logging no TensorBoard
+                writer.add_scalar("Loss/total", loss.item(), global_step) 
+                writer.add_scalar("Loss/contrastive", contrastive_loss.item(), global_step)
+                writer.add_scalar("Loss/entropy", mean_entropy.item(), global_step)
+                writer.add_scalar("Acc/train_step", acc.item(), global_step)
+                
+                global_step += 1
 
             # 3. Métricas da Época (Usando a soma ponderada)
             # Aqui usamos a loss "cheia" para ter a média real das imagens

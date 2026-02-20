@@ -138,7 +138,7 @@ class SceneGraphEvaluator:
 
         return {"expansion_ratio": expansion}
     
-    def evaluate_mean_hypernym_count(scene_g, kg_g):
+    def compute_mean_hypernym_count(scene_g, kg_g):
         """
         Calcula o número médio de hiperônimos (is_a)
         por objeto da cena.
@@ -170,6 +170,105 @@ class SceneGraphEvaluator:
 
         return {
             "mean_hypernym_count": mean_hypernyms
+        }
+        
+    def evaluate_compare_graphs(self, scene_g, kg_g):
+        """
+        Compara Scene Graph com Knowledge Graph.
+        
+        Retorna métricas de:
+        - semantic_coverage
+        - entity_recall
+        - relation_consistency
+        - structural_density
+        """
+
+        # ==========================
+        # 1. Normalização
+        # ==========================
+        scene_labels = {
+            node["label"].lower().strip()
+            for node in scene_g.get("nodes", [])
+        }
+
+        kg_entities = {
+            ent.lower().strip()
+            for ent in kg_g.get("entities", [])
+        }
+
+        # ==========================
+        # 2. Cobertura Semântica
+        # ==========================
+        if len(scene_labels) == 0:
+            semantic_coverage = 0.0
+        else:
+            semantic_coverage = len(
+                scene_labels.intersection(kg_entities)
+            ) / len(scene_labels)
+
+        # ==========================
+        # 3. Entity Recall (KG-side)
+        # ==========================
+        if len(kg_entities) == 0:
+            entity_recall = 0.0
+        else:
+            entity_recall = len(
+                scene_labels.intersection(kg_entities)
+            ) / len(kg_entities)
+
+        # ==========================
+        # 4. Relation Consistency
+        # ==========================
+        sg_relations = {
+            (
+                scene_g["nodes"][edge["source"]]["label"].lower().strip(),
+                edge["relation"].lower().strip(),
+                scene_g["nodes"][edge["target"]]["label"].lower().strip()
+            )
+            for edge in scene_g.get("edges", [])
+            if edge["source"] < len(scene_g["nodes"])
+            and edge["target"] < len(scene_g["nodes"])
+        }
+
+        kg_relations = {
+            (
+                rel[0].lower().strip(),
+                rel[1].lower().strip(),
+                rel[2].lower().strip()
+            )
+            for rel in kg_g.get("relations", [])
+            if len(rel) == 3
+        }
+
+        if len(sg_relations) == 0:
+            relation_consistency = 0.0
+        else:
+            relation_consistency = len(
+                sg_relations.intersection(kg_relations)
+            ) / len(sg_relations)
+
+        # ==========================
+        # 5. Structural Density
+        # ==========================
+        num_nodes = len(scene_g.get("nodes", []))
+        num_edges = len(scene_g.get("edges", []))
+
+        if num_nodes <= 1:
+            structural_density = 0.0
+        else:
+            max_possible_edges = num_nodes * (num_nodes - 1)
+            structural_density = num_edges / max_possible_edges
+
+        # ==========================
+        # 6. Resultado Final
+        # ==========================
+        return {
+            "semantic_coverage": semantic_coverage,
+            "entity_recall": entity_recall,
+            "relation_consistency": relation_consistency,
+            "structural_density": structural_density,
+            "num_nodes": num_nodes,
+            "num_edges": num_edges
         }
     
     def salvar_recall_results(recall_results, filename="recall_metrics.json", directory="results"):
@@ -220,99 +319,150 @@ if __name__ == "__main__":
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    #  Instanciar Encoders (Pesados)
+   
     dino = DinoSceneEncoder(device=device)
     qwen = QwenSceneEmbedder(device=device)
 
-    #  Setup Aligner (Leve)
-    # Certifique-se que o visual_dim condiz com o encoder usado (768 para AnyUp/Dino-B)
-    aligner = LoRACrossAttentionAligner(visual_dim=768, text_dim=4096)
-    
-    weights_path = "checkpoints/aligner_epoch_10.pth" # Ou seu peso final
+    aligner = LoRACrossAttentionAligner(
+        visual_dim=768,
+        text_dim=4096
+    )
+
+    weights_path = "checkpoints/aligner_epoch_10.pth"
     if os.path.exists(weights_path):
-        aligner.load_state_dict(torch.load(weights_path, map_location=device), strict=False)
-        print(f" Pesos carregados de {weights_path}")
+        aligner.load_state_dict(
+            torch.load(weights_path, map_location=device),
+            strict=False
+        )
+        print(f"Pesos carregados de {weights_path}")
     else:
-        print("Checkpoint não encontrado. Rodando com pesos aleatórios para teste.")
+        print("Checkpoint não encontrado. Rodando com pesos aleatórios.")
 
     aligner.to(device).eval()
-    
-    #  Gerador e Avaliador
+
+ 
     generator_sg = SceneGraphGenerator(
-        dino_encoder=dino, 
-        qwen_embedder=qwen, 
-        aligner=aligner, 
+        dino_encoder=dino,
+        qwen_embedder=qwen,
+        aligner=aligner,
         threshold=0.3
     )
-    evaluator = SceneGraphEvaluator(generator_sg)
-    
-    #  Carregar Dataloader de Teste
-    # Substitua pelo caminho correto do seu conjunto de teste
-    test_dataloader = create_all_dataloaders("F:/COYO/coyo/extracted", batch_size=2, num_workers=4, t="test")
 
-    # --- EXECUÇÃO DA AVALIAÇÃO ---
-
-    # A. Métrica de Projeção (Recall Global)
-    print("\n--- Avaliando Alinhamento (Recall@K) ---")
-    recall_results = evaluator.evaluate_projection(test_dataloader, k_values=[1, 5, 10])
-    for k, v in recall_results.items():
-        print(f"{k}: {v:.4f}")
-    print(f"Resultados de Busca: {recall_results}")
-    # SALVA NO DISCO
-    evaluator.salvar_recall_results(recall_results)
-    
-    print("\n Iniciando Processamento do Dataset de Teste...")
-
-    # Gerador de Grafo de Conhecimento (usa o Qwen para fatos)
     generator_kg = KnowledgeGraphGenerator(
-        qwen_model=qwen.model, 
+        qwen_model=qwen.model,
         qwen_tokenizer=qwen.tokenizer
     )
 
-    # Listas para métricas globais
+    evaluator = SceneGraphEvaluator(generator_sg)
+
+    test_dataloader = create_all_dataloaders(
+        "F:/COYO/coyo/extracted",
+        batch_size=2,
+        num_workers=4,
+        t="test"
+    )
+
+  
+    print("\n--- Avaliando Alinhamento (Recall@K) ---")
+    recall_results = evaluator.evaluate_projection(
+        test_dataloader,
+        k_values=[1, 5, 10]
+    )
+
+    for k, v in recall_results.items():
+        print(f"{k}: {v:.4f}")
+
+    evaluator.salvar_recall_results(recall_results)
+
+
+    print("\nIniciando Processamento do Dataset de Teste...")
+
+    # Métricas globais
     all_coverages = []
+    all_expansions = []
+    all_hypernym_means = []
+    all_node_counts = []
+    all_edge_counts = []
 
     try:
-        # Iterar pelo dataloader de teste
-        # Assumindo batch_size=1 para teste qualitativo ou ajustando o loop interno
-        for batch_idx, (images, texts) in enumerate(tqdm(test_dataloader, desc="Processando Teste")):
-            
-            # Processar cada imagem do batch
+        for batch_idx, (images, texts) in enumerate(
+            tqdm(test_dataloader, desc="Processando Teste")
+        ):
             for i, img_tensor in enumerate(images):
-                # Converter tensor para PIL (necessário para o generator.generate)
-                # Dependendo do seu transform, pode precisar de denormalização
-                img_pil = transforms.ToPILImage()(img_tensor.cpu())
-                
-                # Label real do dataset (ground truth)
-                label_real = texts[i]
-                
-                candidatos_dinamicos = extrair_candidatos_llm(label_real, qwen) 
-    
-                # Adicione categorias genéricas fixas para dar "escolha" ao Aligner
-                lista_candidatos = list(set(candidatos_dinamicos + ["person", "vehicle", "object"]))
-                
-                # Gerar SG com a lista refinada
-                
-                sg_result = generator_sg.generate(img_pil, lista_candidatos, ["near", "mounted on"])
-                
-                
-                # 2. Gerar KG (Semântica)
-                kg_result = generator_kg.generate_from_scene(sg_result)
-                
-                # 3. Comparar Grafos
-                comparativo = evaluator.evaluate_compare_graphs(sg_result, kg_result)
-                all_coverages.append(comparativo['semantic_coverage'])
-                
-                # 4. Gravar JSON
-                # Nomeamos o arquivo com o índice do batch e da imagem
-                nome_arquivo = f"resultado_batch{batch_idx}_img{i}.json"
-                salvar_grafos_json(sg_result, kg_result, comparativo, filename=nome_arquivo)
 
-        # Métricas Finais do Dataset
-        media_cobertura = sum(all_coverages) / len(all_coverages) if all_coverages else 0
-        print(f"\n Teste Finalizado!")
-        print(f" Cobertura Semântica Média no Dataset: {media_cobertura:.2%}")
-        print(f" Todos os grafos foram salvos na pasta 'results/'")
+                img_pil = transforms.ToPILImage()(img_tensor.cpu())
+                label_real = texts[i]
+
+             
+                candidatos_dinamicos = extrair_candidatos_llm(
+                    label_real, qwen
+                )
+
+                lista_candidatos = list(
+                    set(candidatos_dinamicos + ["person", "vehicle", "object"])
+                )
+
+              
+                sg_result = generator_sg.generate(
+                    img_pil,
+                    lista_candidatos,
+                    ["near", "mounted on"]
+                )
+
+                
+                kg_result = generator_kg.generate_from_scene(
+                    sg_result
+                )
+
+               
+
+                # Cobertura
+                comparativo = evaluator.evaluate_compare_graphs(
+                    sg_result, kg_result
+                )
+                semantic_coverage = comparativo["semantic_coverage"]
+                all_coverages.append(semantic_coverage)
+
+                # Expansão
+                expansion_result = evaluator.evaluate_expansion(
+                    sg_result, kg_result
+                )
+                all_expansions.append(
+                    expansion_result["expansion_ratio"]
+                )
+
+                # Hypernym mean
+                mean_hypernym = evaluator.compute_mean_hypernym_count(
+                    sg_result
+                )
+                all_hypernym_means.append(mean_hypernym)
+
+                # Estatísticas estruturais
+                all_node_counts.append(len(sg_result["nodes"]))
+                all_edge_counts.append(len(sg_result["edges"]))
+
+                
+                nome_arquivo = f"resultado_batch{batch_idx}_img{i}.json"
+                salvar_grafos_json(
+                    sg_result,
+                    kg_result,
+                    comparativo,
+                    filename=nome_arquivo
+                )
+
+        
+        def safe_mean(values):
+            return sum(values) / len(values) if values else 0
+
+        print("\nTeste Finalizado!")
+        print("=" * 50)
+        print(f"Recall Results: {recall_results}")
+        print(f"Cobertura Semântica Média: {safe_mean(all_coverages):.4f}")
+        print(f"Expansion Ratio Médio: {safe_mean(all_expansions):.4f}")
+        print(f"Mean Hypernym Count: {safe_mean(all_hypernym_means):.4f}")
+        print(f"Nós Médios por SG: {safe_mean(all_node_counts):.2f}")
+        print(f"Relações Médias por SG: {safe_mean(all_edge_counts):.2f}")
+        print("=" * 50)
 
     except Exception as e:
-        print(f" Erro durante o processamento do dataset: {e}")
+        print(f"Erro durante o processamento: {e}")

@@ -31,12 +31,12 @@ class SceneGraphEvaluator:
         all_image_patches = [] # Lista de tensores [N_patches, Dim]
         all_text_queries = []  # Lista de tensores [Dim]
 
-        print("1. Lendo dos arquivos h5 Patches e Embeddings de Texto...")
+        print("1. Lendo dos arquivos Patches e Embeddings de Texto...")
         for visual_input, text_queries in tqdm(dataloader):
             visual_input = visual_input.to(device)
             text_queries = text_queries.to(device)
             
-            for i in range(B):
+            for i in range(visual_input.shape[0]):
                 # Armazena patches crus (sem passar no aligner ainda!)
                 patches_i = visual_input[i]  # [N_patches, 768] 
                 all_image_patches.append(patches_i.cpu())

@@ -1,29 +1,6 @@
-
-
-"""
-Attention-based Scene Graph Generation
-
-Para montar o grafo apenas com os embeddings que você já extraiu, você deve seguir estes 3 passos:
-
-1. Clusterização Semântica (Criação dos Nós)
-Como você tem 200 patches do DINO, alguns deles pertencem ao mesmo objeto.
-
-Ação: Você projeta todos os patches para o espaço de 4096 (usando o SceneGraphAligner).
-
-Ação: Use o embedding do Qwen3 (ex: "cat") como uma query. Calcule a similaridade de cada um dos 200 patches com esse embedding.
-
-Resultado: Os patches com alta similaridade formam o "Nó" do objeto na imagem de forma orgânica (soft-mask).
-
-2. Matriz de Adjacência (Criação das Arestas)
-Para saber se o "Nó A" se relaciona com o "Nó B", você olha para a Atenção Cruzada entre eles.
-
-Cálculo: Se os patches que compõem o "Gato" e os patches que compõem a "Mesa" possuem alta atenção mútua nas camadas profundas do DINO, existe uma aresta entre eles.
-"""
 import torch
 import torch.nn.functional as F
 from models.SG.projection import LoRACrossAttentionAligner, calculate_retrieval_score
-from models.encoders.dinov3_extrator import DinoSceneEncoder
-from models.encoders.qwen3_extrator import QwenSceneEmbedder
 import json
 import os
 from datetime import datetime
@@ -59,10 +36,19 @@ class SceneGraphGenerator:
     def generate(self, image, candidate_nodes: list, candidate_relations: list):
         self.aligner.eval()
         
-        # 1. Extração de Features Visuais
-        _, hr_features = self.encoder.extract_features(image)
-        B, C, H, W = hr_features.shape
-        visual_input = hr_features.view(B, C, -1).transpose(1, 2).to(self.dtype)
+        # 1. Extração: retorna [1, 768, 224, 224]
+        _, hr_feat = self.encoder.extract_features(image.unsqueeze(0).to("cuda")) 
+                    
+        # 2. Pooling
+        # Reduzimos aqui para 32x32
+        hr_feat_small = torch.nn.functional.adaptive_avg_pool2d(hr_feat, (32, 32))
+                    
+        # 3. Squeeze e Transpose: [1, 768, 32, 32] -> [768, 1024] -> [1024, 768]
+        # Aqui removemos o batch do loop para achatar
+        c, h, w = hr_feat_small.shape[1:]
+        flat_feat = hr_feat_small.squeeze(0).reshape(c, -1).transpose(0, 1)
+        
+        visual_input = flat_feat.unsqueeze(0)
 
         # 2. Refinamento de Nós com Pesos de Atenção
         node_queries = self.embedder.embed_components([candidate_nodes], normalize=False)

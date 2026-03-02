@@ -31,7 +31,7 @@ class SceneGraphEvaluator:
         all_image_patches = [] # Lista de tensores [N_patches, Dim]
         all_text_queries = []  # Lista de tensores [Dim]
 
-        print("1. Extraindo Patches e Embeddings de Texto...")
+        print("1. Lendo dos arquivos h5 Patches e Embeddings de Texto...")
         for visual_input, text_queries in tqdm(dataloader):
             visual_input = visual_input.to(device)
             text_queries = text_queries.to(device)
@@ -340,7 +340,7 @@ if __name__ == "__main__":
     evaluator = SceneGraphEvaluator(generator_sg)
 
     test_ds = ShardedH5Dataset("F:/COYO/embeds/test_anyup/")
-    test_dataloader = DataLoader(test_ds, batch_size=16, shuffle=True, pin_memory=True)
+    test_dataloader = DataLoader(test_ds, batch_size=16, shuffle=False, pin_memory=True)
 
   
     print("\n--- Avaliando Alinhamento (Recall@K) ---")

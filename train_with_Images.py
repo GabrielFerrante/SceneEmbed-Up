@@ -197,10 +197,15 @@ def train_lora_projection(epochs=10, batch_size=2):
 
                     _, hr_feat = dino_encoder.extract_features(img)
 
-                    # (1, C, H, W) → (1, HW, C)
-                    feat = hr_feat.reshape(1, hr_feat.shape[1], -1).transpose(1, 2)
+                    # Reduzimos aqui para 32x32
+                    hr_feat_small = torch.nn.functional.adaptive_avg_pool2d(hr_feat, (32, 32))
+                    
+                    # 3. Squeeze e Transpose: [1, 768, 32, 32] -> [768, 1024] -> [1024, 768]
+                    # Aqui removemos o batch do loop para achatar
+                    c, h, w = hr_feat_small.shape[1:]
+                    flat_feat = hr_feat_small.squeeze(0).reshape(c, -1).transpose(0, 1)
 
-                    features_list.append(feat)
+                    features_list.append(flat_feat.unsqueeze(0))
 
                 visual_input = torch.cat(features_list, dim=0).to(device)
 
@@ -249,7 +254,7 @@ def train_lora_projection(epochs=10, batch_size=2):
                 val_acc += acc.item()
                 num_batches += 1
 
-        # --- LOGS FINAIS DA ÉPOCA ---
+        
         avg_train_loss = epoch_loss / batchs
         avg_train_acc = epoch_acc / batchs
         avg_val_loss = val_loss / len(val_dataloader)

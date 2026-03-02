@@ -166,27 +166,10 @@ def train_lora_projection(epochs=10, batch_size=2):
         val_loss, val_acc = 0.0, 0.0
         print(f"Iniciando Validação Época {epoch+1}...")
         with torch.no_grad():
-            for images, texts in tqdm(val_dataloader, desc="Validating"):
+            for visual_input, text_queries in tqdm(val_dataloader, desc="Validating"):
 
-                features_list = []
-
-                for img in images:
-                    img = img.to(device)
-
-                    _, hr_feat = dino_encoder.extract_features(img)
-
-                    # (1, C, H, W) → (1, HW, C)
-                    feat = hr_feat.reshape(1, hr_feat.shape[1], -1).transpose(1, 2)
-
-                    features_list.append(feat)
-
-                visual_input = torch.cat(features_list, dim=0).to(device)
-
-                
-                text_queries = qwen_embedder.embed_components(
-                    [[t] for t in texts],
-                    normalize=False
-                ).to(device)
+                visual_input = visual_input.to(device)
+                text_queries = text_queries.to(device)
 
                 
                 with torch.amp.autocast( device_type=device, dtype=target_dtype):

@@ -2,3 +2,4 @@
 /models/encoders/tokenDINOV3.json
 *.ckpt
 __pycache__
+.vscode

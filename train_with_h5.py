@@ -8,7 +8,6 @@ from tqdm import tqdm
 from data.data_utils_pytorch import ShardedH5Dataset
 from models.aligners.lora_cross_attention import LoRACrossAttentionAligner
 from utils.checkpoint import save_epoch_checkpoint
-from models.encoders.dinov3_extrator import DinoSceneEncoder
 from models.encoders.qwen3_extrator import QwenSceneEmbedder
 from utils.early_stopping import EarlyStopping
 from utils.logging_utils import create_tensorboard_writer
@@ -32,7 +31,6 @@ def train_lora_projection(epochs: int = 10, batch_size: int = 2) -> None:
     print(f"Logs salvos em: {log_dir}")
 
     # 2. Inicializar modelos
-    #dino_encoder = DinoSceneEncoder(device=device) 
     qwen_embedder = QwenSceneEmbedder(device=device)
     
     # visual_dim=768 (AnyUp) ou 384 (FeatUp)

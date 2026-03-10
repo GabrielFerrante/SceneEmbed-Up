@@ -28,3 +28,7 @@ alwaysApply: true
 - Implemente validação de integridade nos arquivos .h5 após a escrita.
 
 ## Sempre que houver atualizações no projeto. Crie ou atualize um arquivo chamado "memory.mdc" para ter de pronta entrega para novos agentes e poupar tokens. 
+
+## Na pasta Docs, crie/atualize arquivos markdown que explique a arqutetura encontrada no atual momento. De modo completo e detalhado.
+
+## Atualize o readme do repositório, com base no seu conhecimento da arquitetura e projeto. Não remova imagens adicionadas.

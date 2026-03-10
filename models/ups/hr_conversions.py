@@ -175,3 +175,14 @@ def load_featup_stack(checkpoint_path, feat_dim=384, device="cuda"):
 class FeatSharpModel: ## ESPERANDO LANÇAMENTO DOS MODELOS
     def __init__(self):
         pass
+    
+class LoftUpModel: 
+    def __init__(self, repo = 'andrehuang/loftup', model =  'loftup_clip', device = 'cuda'):
+        self.repo = repo
+        self.model = model
+        self.device = device
+        self.torch_hub = torch.hub.load(self.repo, self.model, pretrained=True ).to(self.device)
+        
+    def up(self, img_tensor, lr_features):
+        hr_features =  self.torch_hub(img_tensor, lr_features, output_size=(224, 224))
+        return hr_features

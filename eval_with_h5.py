@@ -3,7 +3,7 @@ import torchvision.transforms as transforms
 import torch.nn.functional as F
 from tqdm import tqdm
 import numpy as np
-from models.SG.projection import LoRACrossAttentionAligner
+from models.aligners.lora_cross_attention import LoRACrossAttentionAligner
 from models.encoders.dinov3_extrator import DinoSceneEncoder
 from models.encoders.qwen3_extrator import QwenSceneEmbedder
 from models.SG.generation import SceneGraphGenerator, KnowledgeGraphGenerator, salvar_grafos_json

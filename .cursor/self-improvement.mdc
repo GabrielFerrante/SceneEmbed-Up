@@ -1,0 +1,11 @@
+---
+alwaysApply: true
+---
+
+## Regras para criar técnicas de treino. 
+
+- Toda técnica nova de treino de modelos, deve haver um arquivo de treino separado. Sempre se baseie no arquivo de treino que use imagens em seu loop. E depois crie a versão usando arquivo .h5.
+
+## Regras para criar graficos
+
+- Toda técnica de visualização de modelos ou explicabilidade, seja qualquer pedido pelo usuário, crie um novo arquivo na pasta viz referente a técnica. 

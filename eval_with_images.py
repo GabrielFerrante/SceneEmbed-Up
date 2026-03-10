@@ -3,7 +3,7 @@ import torchvision.transforms as transforms
 import torch.nn.functional as F
 from tqdm import tqdm
 import numpy as np
-from models.SG.projection import LoRACrossAttentionAligner
+from models.aligners.lora_cross_attention import LoRACrossAttentionAligner
 from models.encoders.dinov3_extrator import DinoSceneEncoder
 from models.encoders.qwen3_extrator import QwenSceneEmbedder
 from models.SG.generation import SceneGraphGenerator, KnowledgeGraphGenerator, salvar_grafos_json
@@ -12,6 +12,12 @@ import os
 import json
 from datetime import datetime
 from collections import defaultdict
+from utils.metrics_scene_graph import (
+    evaluate_compare_graphs,
+    evaluate_expansion,
+    compute_mean_hypernym_count,
+    salvar_recall_results,
+)
 
 class SceneGraphEvaluator:
     def __init__(self, generator, device="cuda"):
@@ -172,129 +178,7 @@ class SceneGraphEvaluator:
             "mean_hypernym_count": mean_hypernyms
         }
         
-    def evaluate_compare_graphs(self, scene_g, kg_g):
-        """
-        Compara Scene Graph com Knowledge Graph.
-        
-        Retorna métricas de:
-        - semantic_coverage
-        - entity_recall
-        - relation_consistency
-        - structural_density
-        """
-
-        # ==========================
-        # 1. Normalização
-        # ==========================
-        scene_labels = {
-            node["label"].lower().strip()
-            for node in scene_g.get("nodes", [])
-        }
-
-        kg_entities = {
-            ent.lower().strip()
-            for ent in kg_g.get("entities", [])
-        }
-
-        # ==========================
-        # 2. Cobertura Semântica
-        # ==========================
-        if len(scene_labels) == 0:
-            semantic_coverage = 0.0
-        else:
-            semantic_coverage = len(
-                scene_labels.intersection(kg_entities)
-            ) / len(scene_labels)
-
-        # ==========================
-        # 3. Entity Recall (KG-side)
-        # ==========================
-        if len(kg_entities) == 0:
-            entity_recall = 0.0
-        else:
-            entity_recall = len(
-                scene_labels.intersection(kg_entities)
-            ) / len(kg_entities)
-
-        # ==========================
-        # 4. Relation Consistency
-        # ==========================
-        sg_relations = {
-            (
-                scene_g["nodes"][edge["source"]]["label"].lower().strip(),
-                edge["relation"].lower().strip(),
-                scene_g["nodes"][edge["target"]]["label"].lower().strip()
-            )
-            for edge in scene_g.get("edges", [])
-            if edge["source"] < len(scene_g["nodes"])
-            and edge["target"] < len(scene_g["nodes"])
-        }
-
-        kg_relations = {
-            (
-                rel[0].lower().strip(),
-                rel[1].lower().strip(),
-                rel[2].lower().strip()
-            )
-            for rel in kg_g.get("relations", [])
-            if len(rel) == 3
-        }
-
-        if len(sg_relations) == 0:
-            relation_consistency = 0.0
-        else:
-            relation_consistency = len(
-                sg_relations.intersection(kg_relations)
-            ) / len(sg_relations)
-
-        # ==========================
-        # 5. Structural Density
-        # ==========================
-        num_nodes = len(scene_g.get("nodes", []))
-        num_edges = len(scene_g.get("edges", []))
-
-        if num_nodes <= 1:
-            structural_density = 0.0
-        else:
-            max_possible_edges = num_nodes * (num_nodes - 1)
-            structural_density = num_edges / max_possible_edges
-
-        # ==========================
-        # 6. Resultado Final
-        # ==========================
-        return {
-            "semantic_coverage": semantic_coverage,
-            "entity_recall": entity_recall,
-            "relation_consistency": relation_consistency,
-            "structural_density": structural_density,
-            "num_nodes": num_nodes,
-            "num_edges": num_edges
-        }
-    
-    def salvar_recall_results(recall_results, filename="recall_metrics.json", directory="results"):
-        """
-        Salva os resultados de Recall@K em um arquivo JSON.
-        """
-        if not os.path.exists(directory):
-            os.makedirs(directory)
-            
-        path = os.path.join(directory, filename)
-        
-        # Prepara a estrutura com metadados
-        data_to_save = {
-            "timestamp": datetime.now().isoformat(),
-            "experiment_info": {
-                "model": "LoRA-Aligner-v1",
-                "visual_encoder": "DinoV3",
-                "text_encoder": "Qwen-7B-Embedder"
-            },
-            "metrics": recall_results  # Aqui entra o dicionário {Recall@1: x, Recall@5: y, ...}
-        }
-        
-        with open(path, 'w', encoding='utf-8') as f:
-            json.dump(data_to_save, f, indent=4, ensure_ascii=False)
-        
-        print(f" Métricas de Recall salvas com sucesso em: {path}")
+    # Métricas de comparação de grafos foram extraídas para `utils.metrics_scene_graph`.
     
     
 
@@ -372,7 +256,7 @@ if __name__ == "__main__":
     for k, v in recall_results.items():
         print(f"{k}: {v:.4f}")
 
-    evaluator.salvar_recall_results(recall_results)
+    salvar_recall_results(recall_results)
 
 
     print("\nIniciando Processamento do Dataset de Teste...")
@@ -417,25 +301,21 @@ if __name__ == "__main__":
                
 
                 # Cobertura
-                comparativo = evaluator.evaluate_compare_graphs(
-                    sg_result, kg_result
-                )
+                comparativo = evaluate_compare_graphs(sg_result, kg_result)
                 semantic_coverage = comparativo["semantic_coverage"]
                 all_coverages.append(semantic_coverage)
 
                 # Expansão
-                expansion_result = evaluator.evaluate_expansion(
-                    sg_result, kg_result
-                )
+                expansion_result = evaluate_expansion(sg_result, kg_result)
                 all_expansions.append(
                     expansion_result["expansion_ratio"]
                 )
 
                 # Hypernym mean
-                mean_hypernym = evaluator.compute_mean_hypernym_count(
-                    sg_result
+                mean_hypernym = compute_mean_hypernym_count(
+                    sg_result, kg_result
                 )
-                all_hypernym_means.append(mean_hypernym)
+                all_hypernym_means.append(mean_hypernym["mean_hypernym_count"])
 
                 # Estatísticas estruturais
                 all_node_counts.append(len(sg_result["nodes"]))

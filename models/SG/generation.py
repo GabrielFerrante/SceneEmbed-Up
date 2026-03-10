@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
-from models.SG.projection import LoRACrossAttentionAligner, calculate_retrieval_score
+from models.aligners.lora_cross_attention import LoRACrossAttentionAligner, calculate_retrieval_score
+from utils.graph_io import salvar_grafos_json
 import json
 import os
 from datetime import datetime
@@ -197,25 +198,3 @@ class KnowledgeGraphGenerator:
         knowledge_graph["entities"] = list(knowledge_graph["entities"])
 
         return knowledge_graph
-
-def salvar_grafos_json(scene_graph, knowledge_graph, comparison_metrics=None, filename=None):
-    directory = "results"
-    if not os.path.exists(directory): os.makedirs(directory)
-
-    if filename is None:
-        filename = f"graph_{datetime.now().strftime('%H%M%S')}.json"
-    
-    # Estrutura completa para persistência
-    data_to_save = {
-        "metadata": {
-            "timestamp": datetime.now().isoformat(),
-            "metrics": comparison_metrics or {} # Inclui a 'semantic_coverage' aqui
-        },
-        "scene_graph": scene_graph,
-        "knowledge_graph": knowledge_graph
-    }
-
-    with open(os.path.join(directory, filename), 'w', encoding='utf-8') as f:
-        json.dump(data_to_save, f, indent=4, ensure_ascii=False)
-    
-    print(f" Dados gravados em {filename}")

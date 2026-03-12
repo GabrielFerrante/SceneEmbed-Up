@@ -25,7 +25,7 @@ class LoRACrossAttentionAligner(nn.Module):
     attn_output:
         `[B, N_queries, text_dim]` — embeddings textuais refinidos pelo contexto visual.
     attn_weights:
-        `[B, N_queries, N_patches]` — pesos de atenção sobre os patches visuais.
+        `[B, num_heads, N_queries, N_patches]` — pesos de atenção sobre os patches visuais.
     """
 
     def __init__(self, visual_dim: int, text_dim: int, rank: int = 16, num_heads: int = 8) -> None:

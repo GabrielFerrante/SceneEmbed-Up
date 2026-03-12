@@ -6,6 +6,50 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 
 
+def _to_jsonable(obj: Any) -> Any:
+    """
+    Converte recursivamente estruturas com torch/numpy para tipos serializáveis em JSON.
+    Mantém dict/list/tuple e converte tensores/arrays/escalars para list/float/int.
+    """
+    # Importes locais para não forçar dependências no import do módulo
+    try:
+        import torch  # type: ignore
+    except Exception:  # pragma: no cover
+        torch = None  # type: ignore
+
+    try:
+        import numpy as np  # type: ignore
+    except Exception:  # pragma: no cover
+        np = None  # type: ignore
+
+    if obj is None:
+        return None
+
+    # Torch
+    if torch is not None and isinstance(obj, getattr(torch, "Tensor")):
+        return obj.detach().cpu().tolist()
+
+    # NumPy
+    if np is not None:
+        if isinstance(obj, getattr(np, "ndarray")):
+            return obj.tolist()
+        if isinstance(obj, getattr(np, "generic")):
+            return obj.item()
+
+    # Tipos nativos
+    if isinstance(obj, (str, int, float, bool)):
+        return obj
+
+    if isinstance(obj, dict):
+        return {str(k): _to_jsonable(v) for k, v in obj.items()}
+
+    if isinstance(obj, (list, tuple, set)):
+        return [_to_jsonable(v) for v in obj]
+
+    # Fallback: tenta string (melhor do que quebrar no json.dump)
+    return str(obj)
+
+
 def salvar_grafos_json(
     scene_graph: Dict[str, Any],
     knowledge_graph: Dict[str, Any],
@@ -47,6 +91,7 @@ def salvar_grafos_json(
         "scene_graph": scene_graph,
         "knowledge_graph": knowledge_graph,
     }
+    data_to_save = _to_jsonable(data_to_save)
 
     path = os.path.join(directory, filename)
     with open(path, "w", encoding="utf-8") as f:

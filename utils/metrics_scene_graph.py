@@ -6,6 +6,61 @@ from datetime import datetime
 from typing import Any, Dict, Iterable, List, Mapping
 
 
+def _iter_sg_triplets(scene_g: Mapping[str, Any]) -> Iterable[tuple[str, str, str]]:
+    """
+    Extrai tripletas (sub, rel, obj) do Scene Graph, aceitando:
+    - Formato novo: edges com {source, target, relation} referenciando índices em nodes
+    - Formato legado: edges com {subject, object, relation} diretamente por label
+    """
+    nodes = scene_g.get("nodes", []) or []
+    for edge in scene_g.get("edges", []) or []:
+        if not isinstance(edge, Mapping):
+            continue
+
+        # Formato novo
+        if "source" in edge and "target" in edge:
+            try:
+                s_idx = int(edge.get("source"))
+                t_idx = int(edge.get("target"))
+                if s_idx < 0 or t_idx < 0 or s_idx >= len(nodes) or t_idx >= len(nodes):
+                    continue
+                sub = str(nodes[s_idx].get("label", "")).lower().strip()
+                obj = str(nodes[t_idx].get("label", "")).lower().strip()
+                rel = str(edge.get("relation", "")).lower().strip()
+            except Exception:
+                continue
+            if sub and rel and obj:
+                yield (sub, rel, obj)
+            continue
+
+        # Formato legado
+        sub = str(edge.get("subject", "")).lower().strip()
+        obj = str(edge.get("object", "")).lower().strip()
+        rel = str(edge.get("relation", "")).lower().strip()
+        if sub and rel and obj:
+            yield (sub, rel, obj)
+
+
+def _iter_kg_triplets(kg_g: Mapping[str, Any]) -> Iterable[tuple[str, str, str]]:
+    """
+    Extrai tripletas do Knowledge Graph aceitando:
+    - Formato atual do projeto: factual_edges com {sub, rel, obj}
+    - Formato alternativo: relations como lista de tripletas
+    """
+    for edge in kg_g.get("factual_edges", []) or []:
+        if not isinstance(edge, Mapping):
+            continue
+        sub = str(edge.get("sub", "")).lower().strip()
+        rel = str(edge.get("rel", "")).lower().strip()
+        obj = str(edge.get("obj", "")).lower().strip()
+        if sub and rel and obj:
+            yield (sub, rel, obj)
+
+    for rel in kg_g.get("relations", []) or []:
+        if isinstance(rel, (list, tuple)) and len(rel) == 3:
+            yield (str(rel[0]).lower().strip(), str(rel[1]).lower().strip(), str(rel[2]).lower().strip())
+
+
 def evaluate_expansion(scene_g: Mapping[str, Any], kg_g: Mapping[str, Any]) -> Dict[str, float]:
     """
     Avalia o ganho semântico entre scene graph e knowledge graph.
@@ -56,22 +111,8 @@ def evaluate_compare_graphs(scene_g: Mapping[str, Any], kg_g: Mapping[str, Any])
     else:
         entity_recall = len(scene_labels.intersection(kg_entities)) / len(kg_entities)
 
-    sg_relations = {
-        (
-            scene_g["nodes"][edge["source"]]["label"].lower().strip(),
-            edge["relation"].lower().strip(),
-            scene_g["nodes"][edge["target"]]["label"].lower().strip(),
-        )
-        for edge in scene_g.get("edges", [])
-        if edge["source"] < len(scene_g.get("nodes", []))
-        and edge["target"] < len(scene_g.get("nodes", []))
-    }
-
-    kg_relations = {
-        (rel[0].lower().strip(), rel[1].lower().strip(), rel[2].lower().strip())
-        for rel in kg_g.get("relations", [])
-        if len(rel) == 3
-    }
+    sg_relations = set(_iter_sg_triplets(scene_g))
+    kg_relations = set(_iter_kg_triplets(kg_g))
 
     if len(sg_relations) == 0:
         relation_consistency = 0.0

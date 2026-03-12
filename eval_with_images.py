@@ -6,7 +6,8 @@ import numpy as np
 from models.aligners.lora_cross_attention import LoRACrossAttentionAligner
 from models.encoders.dinov3_extrator import DinoSceneEncoder
 from models.encoders.qwen3_extrator import QwenSceneEmbedder
-from models.SG.generation import SceneGraphGenerator, KnowledgeGraphGenerator, salvar_grafos_json
+from models.SG.generation import SceneGraphGenerator, KnowledgeGraphGenerator
+from utils.graph_io import salvar_grafos_json
 from data.data_utils_pytorch import create_all_dataloaders
 import os
 import json
@@ -121,64 +122,7 @@ class SceneGraphEvaluator:
             
         return results
     
-    def evaluate_expansion(scene_g, kg_g):
-        """
-        avalia o ganho semantico
-        """
-
-        scene_labels = {
-                n['label'].lower().strip()
-                for n in scene_g['nodes']
-        }
-        if not scene_labels:
-            return {"expansion_ratio": 0.0}
-        
-        kg_expanded_entities = {
-                edge['obj']
-                for edge in kg_g['factual_edges']
-        }
-
-        expansion = len(kg_expanded_entities) / len(scene_labels)
-        
-        
-
-        return {"expansion_ratio": expansion}
-    
-    def compute_mean_hypernym_count(scene_g, kg_g):
-        """
-        Calcula o número médio de hiperônimos (is_a)
-        por objeto da cena.
-        """
-
-        # Labels da cena normalizadas
-        scene_labels = {
-            n['label'].lower().strip()
-            for n in scene_g.get('nodes', [])
-        }
-
-        if not scene_labels:
-            return {"mean_hypernym_count": 0.0}
-
-        # Contador de hiperônimos por entidade
-        hypernym_counter = defaultdict(int)
-
-        for edge in kg_g.get('factual_edges', []):
-            sub = edge.get('sub', '').lower().strip()
-            rel = edge.get('rel', '').lower().strip()
-
-            if rel == "is_a" and sub in scene_labels:
-                hypernym_counter[sub] += 1
-
-        # Soma total de hiperônimos
-        total_hypernyms = sum(hypernym_counter.values())
-
-        mean_hypernyms = total_hypernyms / len(scene_labels)
-
-        return {
-            "mean_hypernym_count": mean_hypernyms
-        }
-        
-    # Métricas de comparação de grafos foram extraídas para `utils.metrics_scene_graph`.
+    # Métricas auxiliares estão em `utils.metrics_scene_graph`.
     
     
 

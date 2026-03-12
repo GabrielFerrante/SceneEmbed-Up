@@ -1,7 +1,6 @@
 import torch
 import torch.nn.functional as F
-from models.aligners.lora_cross_attention import LoRACrossAttentionAligner, calculate_retrieval_score
-from utils.graph_io import salvar_grafos_json
+from models.aligners.lora_cross_attention import calculate_retrieval_score
 import json
 import os
 from datetime import datetime
@@ -57,9 +56,13 @@ class SceneGraphGenerator:
         # ALTERAÇÃO 1: Recebendo embeddings E pesos do Aligner
         node_embeddings_refined, node_attn_weights = self.aligner(visual_input, node_queries)
 
+        # Formato padronizado do Scene Graph:
+        # - nodes: lista com ids contíguos (0..N-1)
+        # - edges: {source, target, relation, confidence}
         scene_graph = {"nodes": [], "edges": []}
 
-        # 3. Criação de Nós
+        # 3. Criação de Nós (filtrados por score)
+        kept_original_ids = []
         for i, label in enumerate(candidate_nodes):
             v_aligned = node_embeddings_refined[0, i]
             t_original = node_queries[0, i]
@@ -67,8 +70,10 @@ class SceneGraphGenerator:
             score = calculate_retrieval_score(v_aligned, t_original)
             
             if score > self.threshold:
+                kept_original_ids.append(i)
                 scene_graph["nodes"].append({
-                    "id": i,
+                    # `id` contíguo (índice no array final de nós)
+                    "id": len(scene_graph["nodes"]),
                     "label": label,
                     "embedding": v_aligned,
                     "attn_weights": node_attn_weights[0, i], # Guardando os pesos para análise
@@ -81,7 +86,8 @@ class SceneGraphGenerator:
 
         for node_a in scene_graph["nodes"]:
             for node_b in scene_graph["nodes"]:
-                if node_a["id"] == node_b["id"]: continue
+                if node_a["id"] == node_b["id"]:
+                    continue
                 
                 # ALTERAÇÃO 2: Contexto direcional via Cross-Attention em vez de média
                 # Isso garante que (A, rel, B) != (B, rel, A)
@@ -95,9 +101,9 @@ class SceneGraphGenerator:
                     
                     if rel_score > 0.55: # Threshold levemente ajustado para atenção
                         scene_graph["edges"].append({
-                            "subject": node_a["label"],
+                            "source": int(node_a["id"]),
                             "relation": rel_label,
-                            "object": node_b["label"],
+                            "target": int(node_b["id"]),
                             "confidence": rel_score.item()
                         })
 

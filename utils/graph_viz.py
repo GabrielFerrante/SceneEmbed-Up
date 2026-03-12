@@ -35,7 +35,18 @@ def visualizar_e_salvar_grafo(caminho_json: str) -> Data:
     for node in sg["nodes"]:
         G.add_node(node["label"], type="scene", color="#3498db")
     for edge in sg["edges"]:
-        G.add_edge(edge["subject"], edge["object"], label=edge["relation"], color="#2980b9")
+        # Formato novo: {source, target, relation, confidence}
+        if "source" in edge and "target" in edge:
+            try:
+                sub_label = sg["nodes"][edge["source"]]["label"]
+                obj_label = sg["nodes"][edge["target"]]["label"]
+            except Exception:
+                # Fallback: ignora arestas inválidas
+                continue
+            G.add_edge(sub_label, obj_label, label=edge.get("relation", ""), color="#2980b9")
+        else:
+            # Formato legado: {subject, object, relation}
+            G.add_edge(edge["subject"], edge["object"], label=edge.get("relation", ""), color="#2980b9")
 
     for fact in kg["factual_edges"]:
         if not G.has_node(fact["sub"]):

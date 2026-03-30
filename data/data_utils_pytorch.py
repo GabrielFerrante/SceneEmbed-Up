@@ -3,8 +3,12 @@ import glob
 import torch
 from torch.utils.data import Dataset, DataLoader, random_split
 from torch.utils.data.dataloader import default_collate
+import threading
 from torchvision import transforms
+import random
 from PIL import Image
+import numpy as np
+from tqdm import tqdm
 import h5py
 #NOTA: FOI CRIADO OUTRO ENV PARA EXEXUTAR A EXTRAÇÃO DOS DADOS
 
@@ -123,33 +127,176 @@ class CoyoExtractedDataset(Dataset):
         # Retorna o par
         return image, caption
     
-class ShardedH5Dataset(torch.utils.data.Dataset):
-    def __init__(self, folder_path):
-        # O padrão **/*.h5 procura em todas as subpastas
+class ShardedH5Dataset_withSSD(torch.utils.data.Dataset):
+    def __init__(self, folder_path: str):
         search_pattern = os.path.join(folder_path, "**", "*.h5")
-        self.files = sorted(glob.glob(search_pattern, recursive=True))
-        
-        if len(self.files) == 0:
-            raise RuntimeError(f"Nenhum ficheiro .h5 encontrado em {folder_path}")
+        shard_files = sorted(glob.glob(search_pattern, recursive=True))
 
-    def __len__(self):
-        return len(self.files)
+        if not shard_files:
+            raise RuntimeError(f"Nenhum arquivo .h5 encontrado em {folder_path}")
+
+        self._index: list[tuple[str, int]] = []
+        for path in shard_files:
+            try:
+                with h5py.File(path, "r") as f:
+                    n = f["visual_feats"].shape[0]
+                for local_idx in range(n):
+                    self._index.append((path, local_idx))
+            except Exception as e:
+                print(f"[WARN] Shard ignorado: {path} — {e}")
+
+        if not self._index:
+            raise RuntimeError("Nenhuma amostra válida encontrada nos shards.")
+
+        print(f"[ShardedH5Dataset_withSSD] {len(self._index):,} amostras em {len(shard_files)} shards")
+
+    def __len__(self) -> int:
+        return len(self._index)
 
     def __getitem__(self, idx):
-        file_path = self.files[idx]
+        shard_path, local_idx = self._index[idx]  # ← path direto, sem self._shards
+
+        with h5py.File(shard_path, "r") as f:      # ← abre o arquivo pelo path
+            visual = f["visual_feats"][local_idx]   # [1024, 768]
+            text   = f["text_feats"][local_idx]     # [1, 4096]
+
+        return torch.from_numpy(visual), torch.from_numpy(text)
         
-        # Tentamos abrir o ficheiro. Se falhar (ex: ficheiro corrompido), 
-        # podemos capturar o erro aqui.
-        try:
-            with h5py.File(file_path, 'r') as f:
-                visual_input = torch.from_numpy(f['visual_feats'][:]).to(torch.bfloat16)
-                text_queries = torch.from_numpy(f['text_feats'][:]).to(torch.bfloat16)
-            return visual_input, text_queries
-            
-        except Exception as e:
-            print(f"Erro ao ler {file_path}: {e}")
-            # Retorna o próximo item se houver erro (estratégia simples de fallback)
-            return self.__getitem__((idx + 1) % len(self.files))
+        
+class ShardedH5Dataset_withHD(Dataset):
+    """
+    Dataset com buffer rotativo de shards em memória.
+
+    Carrega `shards_in_memory` shards por vez na RAM. Quando todos os
+    samples do buffer forem consumidos, o buffer é recarregado com os
+    próximos shards automaticamente em background.
+
+    Parameters
+    ----------
+    folder_path:
+        Diretório raiz com os arquivos `.h5`.
+    shards_in_memory:
+        Quantos shards manter na RAM simultaneamente.
+    shuffle_shards:
+        Se True, embaralha a ordem dos shards a cada rotação.
+    """
+
+    def __init__(self, folder_path: str, shards_in_memory: int = 9, shuffle_shards: bool = True):
+        search_pattern = os.path.join(folder_path, "**", "*.h5")
+        self._all_shards = sorted(glob.glob(search_pattern, recursive=True))
+
+        if not self._all_shards:
+            raise RuntimeError(f"Nenhum arquivo .h5 encontrado em {folder_path}")
+
+        self.shards_in_memory = shards_in_memory
+        self.shuffle_shards   = shuffle_shards
+
+        # Fila de shards ainda não carregados nesta epoch
+        self._shard_queue: list[str] = []
+
+        # Tensores ativos em RAM
+        self._visual: torch.Tensor | None = None
+        self._text:   torch.Tensor | None = None
+
+        # Prefetch: próximo buffer sendo carregado em background
+        self._next_visual: torch.Tensor | None = None
+        self._next_text:   torch.Tensor | None = None
+        self._prefetch_thread: threading.Thread | None = None
+
+        # Carrega o primeiro buffer de forma síncrona
+        self._reset_queue()
+        self._load_next_buffer_sync()
+        
+        # Dispara prefetch do buffer seguinte
+        self._start_prefetch()
+
+    # ------------------------------------------------------------------
+    # Gerenciamento de fila e buffers
+    # ------------------------------------------------------------------
+
+    def _reset_queue(self) -> None:
+        """Recarrega a fila com todos os shards (embaralhados ou não)."""
+        self._shard_queue = list(self._all_shards)
+        if self.shuffle_shards:
+            random.shuffle(self._shard_queue)
+
+    def _load_shards(self, paths: list[str]) -> tuple[torch.Tensor, torch.Tensor]:
+        """Lê uma lista de shards e retorna tensores concatenados."""
+        visuals, texts = [], []
+        for path in tqdm(paths, desc="  Carregando shards", leave=False):
+            try:
+                with h5py.File(path, "r") as f:
+                    visuals.append(torch.from_numpy(f["visual_feats"][:]))
+                    texts.append(torch.from_numpy(f["text_feats"][:]))
+            except Exception as e:
+                print(f"[WARN] Shard ignorado: {path} — {e}")
+
+        if not visuals:
+            raise RuntimeError("Nenhum shard válido carregado no buffer.")
+
+        return torch.cat(visuals, dim=0), torch.cat(texts, dim=0)
+
+    def _load_next_buffer_sync(self) -> None:
+        """Carrega o próximo grupo de shards de forma síncrona para o buffer ativo."""
+        if not self._shard_queue:
+            self._reset_queue()
+
+        batch = self._shard_queue[:self.shards_in_memory]
+        self._shard_queue = self._shard_queue[self.shards_in_memory:]
+
+        print(f"\n[Buffer] Carregando {len(batch)} Next's shards em memória...")
+        self._visual, self._text = self._load_shards(batch)
+        print(f"[Buffer] {len(self._visual):,} amostras disponíveis.")
+
+    def _start_prefetch(self) -> None:
+        """Dispara thread de background para pré-carregar o próximo buffer."""
+        if not self._shard_queue:
+            # Fila vazia: próxima carga virá de uma nova epoch
+            return
+
+        batch = self._shard_queue[:self.shards_in_memory]
+        # Não remove da fila ainda — só remove quando o buffer for rotacionado
+
+        def _worker():
+            self._next_visual, self._next_text = self._load_shards(batch)
+
+        self._prefetch_thread = threading.Thread(target=_worker, daemon=True)
+        self._prefetch_thread.start()
+
+    def rotate_buffer(self) -> None:
+        """
+        Descarta o buffer atual e ativa o próximo (pré-carregado).
+        Deve ser chamado ao final de cada época ou quando desejado.
+        """
+        # Aguarda prefetch terminar (se ainda em andamento)
+        if self._prefetch_thread is not None:
+            self._prefetch_thread.join()
+            self._prefetch_thread = None
+
+        if self._next_visual is not None:
+            # Remove os shards que já foram pré-carregados da fila
+            self._shard_queue = self._shard_queue[self.shards_in_memory:]
+            self._visual = self._next_visual
+            self._text   = self._next_text
+            self._next_visual = None
+            self._next_text   = None
+            print(f"\n[Buffer] Rotacionado — {len(self._visual):,} amostras em memória.")
+        else:
+            # Prefetch não tinha dados (fim de fila): recarrega do zero
+            self._load_next_buffer_sync()
+
+        # Dispara prefetch do próximo
+        self._start_prefetch()
+
+    # ------------------------------------------------------------------
+    # Interface Dataset
+    # ------------------------------------------------------------------
+
+    def __len__(self) -> int:
+        return len(self._visual)
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        return self._visual[idx], self._text[idx]
 
 def create_all_dataloaders( #USAR SE TIVER MEMÓRIA VRAM O SUFICIENTE
     root_dir, 

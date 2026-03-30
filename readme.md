@@ -15,7 +15,7 @@ O treinamento do sistema de alinhamento multimodal baseia-se em uma arquitetura 
 **Dataset utilizado**
 
 * COYO-700M (https://github.com/kakaobrain/coyo-dataset) subset com 7.794.790 de pares de imagens e captions.
-    - 500k Treino
+    - 480k Treino
     - 10k Validação 
     - 10k Teste
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Tuple
+import math
 
 import torch
 import torch.nn as nn
@@ -38,16 +39,18 @@ class LoRACrossAttentionAligner(nn.Module):
             self.visual_proj.bias.requires_grad = False
 
         # 2. Camada de Cross-Attention
+        # Observação: algumas versões do PyTorch não suportam o argumento
+        # `average_attn_weights`. Mantemos a assinatura mínima compatível.
         self.cross_attn = nn.MultiheadAttention(
             embed_dim=text_dim,
             num_heads=num_heads,
             batch_first=True,
-            average_attn_weights=False,
         )
 
         # 3. LoRA (A e B)
         self.lora_A_v = nn.Parameter(torch.empty(visual_dim, rank))
-        nn.init.kaiming_uniform_(self.lora_A_v, a=torch.sqrt(torch.tensor(5.0)))
+        # Usa um escalar float padrão para o parâmetro `a` (negative_slope)
+        nn.init.kaiming_uniform_(self.lora_A_v, a=math.sqrt(5.0))
         self.lora_B_v = nn.Parameter(torch.zeros(rank, text_dim))
 
         self.scaling = 32.0 / rank  # alpha = 32
@@ -79,7 +82,7 @@ class LoRACrossAttentionAligner(nn.Module):
             value=v_features,
         )
 
-        return attn_output, attn_weights
+        return attn_output, attn_weights, v_features
 
 
 def calculate_retrieval_score(visual_aligned: torch.Tensor, text_embedding: torch.Tensor) -> torch.Tensor:

@@ -81,30 +81,28 @@ def train_lora_projection(epochs: int = 10, batch_size: int = 2) -> None:
 
             try:
                 with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
-                    visual_refined, attn_weights = aligner(visual_input, text_queries)
+                    visual_refined, attn_weights, v_features = aligner(visual_input, text_queries)
 
-                    visual_projected = visual_refined.squeeze(1)
-                    text_target = text_queries.squeeze(1)
-
-                    v_norm = F.normalize(visual_projected, p=2, dim=-1)
-                    t_norm = F.normalize(text_target, p=2, dim=-1)
-
-                    temperature = 0.07
-                    logits = torch.matmul(v_norm, t_norm.T) / temperature
-
-                    current_batch_size = visual_projected.size(0)
-                    labels = torch.arange(current_batch_size, device=device)
-
-                    loss_v = F.cross_entropy(logits, labels)
-                    loss_t = F.cross_entropy(logits.T, labels)
+                    v_norm  = F.normalize(visual_refined.squeeze(1), p=2, dim=-1)
+                    t_norm  = F.normalize(text_queries.squeeze(1),   p=2, dim=-1)
+                    logits  = torch.matmul(v_norm, t_norm.T) / 0.07
+                    labels  = torch.arange(v_norm.size(0), device=device)
+                    loss_v  = F.cross_entropy(logits,   labels)
+                    loss_t  = F.cross_entropy(logits.T, labels)
                     contrastive_loss = (loss_v + loss_t) / 2
+
+                    # Loss novo — supervisa v_features diretamente:
+                    v_global      = v_features.mean(dim=1)                     # [B, text_dim]
+                    v_global_norm = F.normalize(v_global, p=2, dim=-1)
+                    logits_vg     = torch.matmul(v_global_norm, t_norm.T) / 0.07
+                    loss_vg       = (F.cross_entropy(logits_vg,   labels) +
+                                    F.cross_entropy(logits_vg.T, labels)) / 2
 
                     entropy = -torch.sum(attn_weights * torch.log(attn_weights + 1e-8), dim=-1)
                     mean_entropy = entropy.mean()
-
-                    target_entropy = 2.5
-                    entropy_reg = (mean_entropy - target_entropy) ** 2
-                    loss = contrastive_loss + lambda_entropy * entropy_reg
+                    entropy_reg = (mean_entropy - 2.5) ** 2
+                    # Loss final:
+                    loss = contrastive_loss + 0.5 * loss_vg + 0.01 * entropy_reg
 
                     with torch.no_grad():
                         preds = torch.argmax(logits, dim=1)
@@ -121,6 +119,8 @@ def train_lora_projection(epochs: int = 10, batch_size: int = 2) -> None:
                 writer.add_scalar("Loss/contrastive", contrastive_loss.item(), global_step)
                 writer.add_scalar("Loss/entropy", mean_entropy.item(), global_step)
                 writer.add_scalar("Acc/train_step", acc.item(), global_step)
+                writer.add_scalar("Loss/contrastive_attn",    contrastive_loss.item(), global_step)
+                writer.add_scalar("Loss/contrastive_vfeats",  loss_vg.item(),          global_step)
 
                 global_step += 1
             except RuntimeError as e:

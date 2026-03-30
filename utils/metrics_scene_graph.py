@@ -156,6 +156,7 @@ def salvar_recall_results(
             "model": "LoRA-Aligner-v1",
             "visual_encoder": "DinoV3",
             "text_encoder": "Qwen-7B-Embedder",
+            "upsampler" : "AnyUp"
         },
         "metrics": dict(recall_results),
     }

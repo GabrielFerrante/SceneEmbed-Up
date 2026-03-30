@@ -54,7 +54,7 @@ class SceneGraphGenerator:
         node_queries = self.embedder.embed_components([candidate_nodes], normalize=False)
         
         # ALTERAÇÃO 1: Recebendo embeddings E pesos do Aligner
-        node_embeddings_refined, node_attn_weights = self.aligner(visual_input, node_queries)
+        node_embeddings_refined, node_attn_weights, _ = self.aligner(visual_input, node_queries)
 
         # Formato padronizado do Scene Graph:
         # - nodes: lista com ids contíguos (0..N-1)

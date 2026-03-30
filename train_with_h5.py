@@ -39,6 +39,11 @@ def train_lora_projection(epochs: int = 10, batch_size: int = 16) -> None:
 
     global_step = 0
     controller = EarlyStopping(patience=10)
+    
+     # Hiperparâmetros de entropia 
+
+    TARGET_ENTROPY = 1.5   # era 2.5
+    LAMBDA_ENTROPY = 0.05  # era 0.01
 
     for epoch in range(epochs):
         aligner.train()
@@ -68,11 +73,22 @@ def train_lora_projection(epochs: int = 10, batch_size: int = 16) -> None:
                     loss_vg       = (F.cross_entropy(logits_vg,   labels) +
                                     F.cross_entropy(logits_vg.T, labels)) / 2
 
-                    entropy = -torch.sum(attn_weights * torch.log(attn_weights + 1e-8), dim=-1)
+                    # ── Regularização de entropia corrigida ──────────────────
+                    # attn_weights: [B, num_heads, N_queries, N_patches]
+                    # Calcula entropia por head e por query, depois média global.
+                    # Isso garante que TODAS as heads sejam supervisionadas,
+                    entropy = -torch.sum(
+                        attn_weights * torch.log(attn_weights + 1e-8), dim=-1
+                    )  # [B, num_heads, N_queries]
                     mean_entropy = entropy.mean()
-                    entropy_reg = (mean_entropy - 2.5) ** 2
-                    # Loss final:
-                    loss = contrastive_loss + 0.5 * loss_vg + 0.01 * entropy_reg
+ 
+                    # Penaliza entropia ACIMA do target (atenção difusa)
+                    # e também ABAIXO (atenção colapsada num único patch).
+                    # A forma quadrada (mean - target)² já faz isso simetricamente.
+                    entropy_reg = (mean_entropy - TARGET_ENTROPY) ** 2
+ 
+                    # Loss final com lambda corrigido
+                    loss = contrastive_loss + 0.5 * loss_vg + LAMBDA_ENTROPY * entropy_reg
 
                     with torch.no_grad():
                         acc = (torch.argmax(logits, dim=1) == labels).float().mean()
@@ -93,12 +109,18 @@ def train_lora_projection(epochs: int = 10, batch_size: int = 16) -> None:
             train_samples += b
             global_step  += 1
 
-            pbar.set_postfix(loss=f"{loss.item():.4f}", acc=f"{acc.item():.2f}")
+            pbar.set_postfix(
+                loss=f"{loss.item():.4f}",
+                acc=f"{acc.item():.2f}",
+                ent=f"{mean_entropy.item():.2f}",
+            )
 
             if global_step % 10 == 0:
                 writer.add_scalar("Loss/total",        loss.item(),              global_step)
                 writer.add_scalar("Loss/contrastive",  contrastive_loss.item(),  global_step)
                 writer.add_scalar("Loss/entropy",      mean_entropy.item(),      global_step)
+                writer.add_scalar("Loss/entropy_reg",  entropy_reg.item(),      global_step)  # novo
+                writer.add_scalar("Loss/contrastive_vfeats",      loss_vg.item(),          global_step)  # novo
                 writer.add_scalar("Acc/train_step",    acc.item(),               global_step)
 
         # ── Validação ────────────────────────────────────────────────────────

@@ -256,7 +256,7 @@ tensorboard --logdir logs/
 
 ## Referências
 
-- [DINOv3]https://github.com/facebookresearch/dinov3 — Meta AI
+- [DINOv3](https://github.com/facebookresearch/dinov3) — Meta AI
 - [Qwen3](https://huggingface.co/Qwen/Qwen3-Embedding-8B) — Alibaba Cloud
 - [AnyUp](https://github.com/wimmerth/anyup) — Wimmer et al.
 - [FeatUp](https://github.com/mhamilton723/FeatUp) — Hamilton et al.

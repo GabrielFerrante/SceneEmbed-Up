@@ -30,7 +30,6 @@ from typing import Dict, List
 
 import torch
 import torch.nn.functional as F
-import torchvision.transforms as transforms
 from tqdm import tqdm
 
 from data.data_utils_pytorch import ShardedH5Dataset_withSSD, create_all_dataloaders
@@ -96,18 +95,17 @@ def diagnosticar_embeddings(
 # Construção da matriz de similaridade simétrica
 # ---------------------------------------------------------------------------
 
-def _build_sim_matrix_symmetric(
+def _build_sim_matrix(
     V: torch.Tensor,
     T: torch.Tensor,
     device: str,
     chunk_size: int = 512,
 ) -> torch.Tensor:
     """
-    Calcula matriz de similaridade simétrica entre embeddings visuais e textuais.
+    Calcula matriz de similaridade V @ T^T (linhas=imagens, colunas=textos).
 
-    Usa produto escalar direto (V @ T^T) após normalização L2. A simetria é
-    garantida fazendo a média entre a matriz original e sua transposta, corrigindo
-    pequenas assimetrias numéricas de bfloat16.
+    Usa produto escalar direto após normalização L2. A matriz NÃO é
+    simetrizada, permitindo que I2T e T2I sejam avaliados independentemente.
 
     Parameters
     ----------
@@ -123,28 +121,25 @@ def _build_sim_matrix_symmetric(
     Returns
     -------
     torch.Tensor
-        Matriz `[N, N]` de similaridades, em CPU, dtype float32.
+        Matriz `[N, N]` onde `[i, j] = sim(visual_i, texto_j)`, CPU, float32.
     """
     N = V.shape[0]
     sim_matrix = torch.zeros(N, N, dtype=torch.float32)
 
-    V_gpu = V.to(device)  # [N, D] — fixo na GPU durante o loop
+    T_gpu = T.to(device)  # [N, D] — fixo na GPU durante o loop
 
     for start in tqdm(range(0, N, chunk_size), desc="Similarity chunks", leave=False):
         end = min(start + chunk_size, N)
-        t_chunk = T[start:end].to(device)           # [C, D]
-        sim_chunk = torch.matmul(t_chunk, V_gpu.T)  # [C, N]
+        v_chunk = V[start:end].to(device)           # [C, D]
+        sim_chunk = torch.matmul(v_chunk, T_gpu.T)  # [C, N]
         sim_matrix[start:end] = sim_chunk.float().cpu()
 
-        del t_chunk, sim_chunk
+        del v_chunk, sim_chunk
         torch.cuda.empty_cache()
 
-    del V_gpu
+    del T_gpu
     torch.cuda.empty_cache()
 
-    # Simetrização: média de sim(i,j) e sim(j,i)
-    # Isso corrige viés direcional residual causado por bfloat16
-    sim_matrix = (sim_matrix + sim_matrix.T) / 2.0
     return sim_matrix
 
 
@@ -294,6 +289,15 @@ class SceneGraphEvaluator:
 
         V = torch.cat(all_v_global, dim=0)  # [N, 4096] — CPU
         T = torch.cat(all_t_norm,   dim=0)  # [N, 4096] — CPU
+        
+
+
+        # Diagnóstico — rode isso antes de calcular a matriz
+        print(f"V shape: {V.shape}, norm média: {V.norm(dim=-1).mean():.4f}")
+        print(f"T shape: {T.shape}, norm média: {T.norm(dim=-1).mean():.4f}")
+        print(f"Similaridade V[0] vs T[0] (par correto): {(V[0] * T[0]).sum():.4f}")
+        print(f"Similaridade V[0] vs T[1] (par errado):  {(V[0] * T[1]).sum():.4f}")
+        print(f"V == T: {torch.allclose(V, T, atol=1e-3)}")
 
         assert V.shape[1] == T.shape[1], (
             f"Dimensões incompatíveis: V={V.shape}, T={T.shape}. "
@@ -304,7 +308,7 @@ class SceneGraphEvaluator:
         print(f"2. Construindo matriz de similaridade simétrica [{N}×{N}]...")
 
         # Constrói matriz simétrica e calcula Recall bidirecional
-        sim_matrix = _build_sim_matrix_symmetric(V, T, self.device, chunk_size)
+        sim_matrix = _build_sim_matrix(V, T, self.device, chunk_size)
 
         print("3. Calculando Recall@K bidirecional...")
         results = calcular_recall_bidirecional(sim_matrix, k_values)
@@ -387,7 +391,7 @@ if __name__ == "__main__":
     dino = DinoSceneEncoder(device=device)
     qwen = QwenSceneEmbedder(device=device)
 
-    aligner = LoRACrossAttentionAligner(visual_dim=768, text_dim=4096)
+    aligner = LoRACrossAttentionAligner(visual_dim=768, text_dim=4096, rank=64)
 
     weights_path = "checkpoints/best_aligner.pth"
     if os.path.exists(weights_path):
@@ -423,7 +427,7 @@ if __name__ == "__main__":
 
     test_img_loader = create_all_dataloaders(
         "F:/COYO/coyo/extracted",
-        batch_size=4,
+        batch_size=8,
         num_workers=4,
         t="test",
     )
@@ -476,7 +480,6 @@ if __name__ == "__main__":
             tqdm(test_img_loader, desc="Processando Teste (SG/KG)")
         ):
             for i, img_tensor in enumerate(images):
-                img_pil = transforms.ToPILImage()(img_tensor.cpu())
                 label_real = texts[i]
 
                 candidatos_dinamicos = extrair_candidatos_llm(label_real, qwen)
@@ -485,7 +488,7 @@ if __name__ == "__main__":
                 )
 
                 sg_result = generator_sg.generate(
-                    img_pil,
+                    img_tensor,
                     lista_candidatos,
                     ["near", "mounted on"],
                 )

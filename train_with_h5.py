@@ -32,7 +32,7 @@ def train_lora_projection(epochs: int = 10, batch_size: int = 16) -> None:
         pin_memory=True, num_workers=4, prefetch_factor=4, persistent_workers=True
     )
 
-    aligner = LoRACrossAttentionAligner(visual_dim=768, text_dim=4096, rank=16)
+    aligner = LoRACrossAttentionAligner(visual_dim=768, text_dim=4096, rank=64)
     aligner = aligner.to(device).to(autocast_dtype)
     trainable_params = [p for p in aligner.parameters() if p.requires_grad]
     optimizer = optim.AdamW(trainable_params, lr=1e-4, weight_decay=0.01)
@@ -45,85 +45,102 @@ def train_lora_projection(epochs: int = 10, batch_size: int = 16) -> None:
     TARGET_ENTROPY = 1.5   # era 2.5
     LAMBDA_ENTROPY = 0.05  # era 0.01
 
+    num_shards = len(train_ds._all_shards)
+
     for epoch in range(epochs):
         aligner.train()
         epoch_loss, epoch_acc, train_samples = 0.0, 0.0, 0
 
-        pbar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{epochs}")
-        for visual_input, text_queries in pbar:
-            visual_input = visual_input.to(device, non_blocking=True).to(autocast_dtype)
-            text_queries = text_queries.to(device, non_blocking=True).to(autocast_dtype)
+        # Itera por todos os shards dentro de uma época
+        # (1 shard em RAM por vez via HDD, prefetch do próximo em background)
+        for shard_idx in range(num_shards):
+            if shard_idx > 0:
+                train_ds.rotate_buffer()
 
-            try:
-                with torch.amp.autocast(device_type=device, dtype=autocast_dtype):
-                    visual_refined, attn_weights, v_features = aligner(visual_input, text_queries)
-
-                    v_norm  = F.normalize(visual_refined.squeeze(1), p=2, dim=-1)
-                    t_norm  = F.normalize(text_queries.squeeze(1),   p=2, dim=-1)
-                    logits  = torch.matmul(v_norm, t_norm.T) / 0.07
-                    labels  = torch.arange(v_norm.size(0), device=device)
-                    loss_v  = F.cross_entropy(logits,   labels)
-                    loss_t  = F.cross_entropy(logits.T, labels)
-                    contrastive_loss = (loss_v + loss_t) / 2
-
-                    # Loss novo — supervisa v_features diretamente:
-                    v_global      = v_features.mean(dim=1)                     # [B, text_dim]
-                    v_global_norm = F.normalize(v_global, p=2, dim=-1)
-                    logits_vg     = torch.matmul(v_global_norm, t_norm.T) / 0.07
-                    loss_vg       = (F.cross_entropy(logits_vg,   labels) +
-                                    F.cross_entropy(logits_vg.T, labels)) / 2
-
-                    # ── Regularização de entropia corrigida ──────────────────
-                    # attn_weights: [B, num_heads, N_queries, N_patches]
-                    # Calcula entropia por head e por query, depois média global.
-                    # Isso garante que TODAS as heads sejam supervisionadas,
-                    entropy = -torch.sum(
-                        attn_weights * torch.log(attn_weights + 1e-8), dim=-1
-                    )  # [B, num_heads, N_queries]
-                    mean_entropy = entropy.mean()
- 
-                    # Penaliza entropia ACIMA do target (atenção difusa)
-                    # e também ABAIXO (atenção colapsada num único patch).
-                    # A forma quadrada (mean - target)² já faz isso simetricamente.
-                    entropy_reg = (mean_entropy - TARGET_ENTROPY) ** 2
- 
-                    # Loss final com lambda corrigido
-                    loss = contrastive_loss + 0.5 * loss_vg + LAMBDA_ENTROPY * entropy_reg
-
-                    with torch.no_grad():
-                        acc = (torch.argmax(logits, dim=1) == labels).float().mean()
-
-                optimizer.zero_grad()
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)  # ← clip
-                optimizer.step()
-
-            except RuntimeError as e:
-                if "CUDA" in str(e).upper() and torch.cuda.is_available():
-                    print(torch.cuda.memory_summary())
-                raise
-
-            b = visual_input.size(0)
-            epoch_loss   += loss.item() * b
-            epoch_acc    += acc.item()  * b
-            train_samples += b
-            global_step  += 1
-
-            pbar.set_postfix(
-                loss=f"{loss.item():.4f}",
-                acc=f"{acc.item():.2f}",
-                ent=f"{mean_entropy.item():.2f}",
+            pbar = tqdm(
+                train_dataloader,
+                desc=f"Epoch {epoch+1}/{epochs} shard {shard_idx+1}/{num_shards}",
             )
+            for visual_input, text_queries in pbar:
+                visual_input = visual_input.to(device, non_blocking=True).to(autocast_dtype)
+                text_queries = text_queries.to(device, non_blocking=True).to(autocast_dtype)
 
-            if global_step % 10 == 0:
-                writer.add_scalar("Loss/total",        loss.item(),              global_step)
-                writer.add_scalar("Loss/contrastive",  contrastive_loss.item(),  global_step)
-                writer.add_scalar("Loss/entropy",      mean_entropy.item(),      global_step)
-                writer.add_scalar("Loss/entropy_reg",  entropy_reg.item(),      global_step)  # novo
-                writer.add_scalar("Loss/contrastive_vfeats",      loss_vg.item(),          global_step)  # novo
-                writer.add_scalar("Acc/train_step",    acc.item(),               global_step)
+                try:
+                    with torch.amp.autocast(device_type=device, dtype=autocast_dtype):
+                        visual_refined, attn_weights, v_features = aligner(visual_input, text_queries)
 
-        # ── Validação ────────────────────────────────────────────────────────
+                        v_norm = F.normalize(visual_refined.squeeze(1), p=2, dim=-1)
+                        t_norm = F.normalize(text_queries.squeeze(1),   p=2, dim=-1)
+                        logits = torch.matmul(v_norm, t_norm.T) / 0.05
+                        labels = torch.arange(v_norm.size(0), device=device)
+                        loss_v = F.cross_entropy(logits,   labels)
+                        loss_t = F.cross_entropy(logits.T, labels)
+                        contrastive_loss = (loss_v + loss_t) / 2
+
+
+                        # attn_weights: [B, num_heads, N_queries, N_patches]
+                        # Calcula entropia por head e por query, depois média global.
+                        # Isso garante que TODAS as heads sejam supervisionadas,
+                        entropy = -torch.sum(
+                            attn_weights * torch.log(attn_weights + 1e-8), dim=-1
+                        )  # [B, num_heads, N_queries]
+                        mean_entropy = entropy.mean()
+
+                        # Penaliza entropia ACIMA do target (atenção difusa)
+                        # e também ABAIXO (atenção colapsada num único patch).
+                        # A forma quadrada (mean - target)² já faz isso simetricamente.
+                        entropy_reg = (mean_entropy - TARGET_ENTROPY) ** 2
+
+                        # Loss final com lambda corrigido
+                        loss = contrastive_loss +  LAMBDA_ENTROPY * entropy_reg
+
+                        #ESSA PARTE mede a qualidade da projeção LoRA, antes do cross-attention
+                        with torch.no_grad():
+                            v_global      = v_features.mean(dim=1)                     # [B, text_dim]
+                            v_global_norm = F.normalize(v_global, p=2, dim=-1)
+                            logits_vg     = torch.matmul(v_global_norm, t_norm.T) / 0.07
+                            loss_vg       = (F.cross_entropy(logits_vg,   labels) +
+                                            F.cross_entropy(logits_vg.T, labels)) / 2
+
+                            #CALCULAR ACURACIA DE TREINO
+                            acc = (torch.argmax(logits, dim=1) == labels).float().mean()
+
+
+
+                    optimizer.zero_grad()
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)  # ← clip
+                    optimizer.step()
+
+                except RuntimeError as e:
+                    if "CUDA" in str(e).upper() and torch.cuda.is_available():
+                        print(torch.cuda.memory_summary())
+                    raise
+
+                b = visual_input.size(0)
+                epoch_loss   += loss.item() * b
+                epoch_acc    += acc.item()  * b
+                train_samples += b
+                global_step  += 1
+
+                pbar.set_postfix(
+                    loss=f"{loss.item():.4f}",
+                    acc=f"{acc.item():.2f}",
+                    ent=f"{mean_entropy.item():.2f}",
+                )
+
+                if global_step % 10 == 0:
+                    writer.add_scalar("Loss/total",        loss.item(),              global_step)
+                    writer.add_scalar("Loss/contrastive",  contrastive_loss.item(),  global_step)
+                    writer.add_scalar("Loss/entropy",      mean_entropy.item(),      global_step)
+                    writer.add_scalar("Loss/entropy_reg",  entropy_reg.item(),      global_step)
+                    writer.add_scalar("Loss/contrastive_vfeats",      loss_vg.item(),          global_step)
+                    writer.add_scalar("Acc/train_step",    acc.item(),               global_step)
+
+        # Rotaciona para preparar o primeiro shard da próxima época
+        train_ds.rotate_buffer()
+
+        # ── Validação (SSD) ──────────────────────────────────────────────────
         aligner.eval()
         val_loss, val_acc, val_samples = 0.0, 0.0, 0
 
@@ -138,7 +155,7 @@ def train_lora_projection(epochs: int = 10, batch_size: int = 16) -> None:
                     v_norm = F.normalize(visual_refined.squeeze(1), p=2, dim=-1)
                     t_norm = F.normalize(text_queries.squeeze(1),   p=2, dim=-1)
 
-                    logits = torch.matmul(v_norm, t_norm.T) / 0.07
+                    logits = torch.matmul(v_norm, t_norm.T) / 0.05
                     labels = torch.arange(v_norm.size(0), device=device)
 
                     loss_v = F.cross_entropy(logits, labels)
@@ -169,15 +186,13 @@ def train_lora_projection(epochs: int = 10, batch_size: int = 16) -> None:
 
         if controller(avg_val_loss, aligner.state_dict(), epoch):
             break
-        
-        train_ds.rotate_buffer()
 
     writer.close()
     print("Treino finalizado!")
     
 
 if __name__ == "__main__":
-    EPOCHS = 100 
+    EPOCHS = 20 
     BATCH_SIZE = 64 
    
     print("--- Iniciando Pipeline de Treinamento da camada de projeção ---")

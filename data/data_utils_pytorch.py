@@ -128,6 +128,14 @@ class CoyoExtractedDataset(Dataset):
         return image, caption
     
 class ShardedH5Dataset_withSSD(torch.utils.data.Dataset):
+    """
+    Dataset para shards H5 em SSD com cache de file handles.
+
+    Mantém os arquivos h5 abertos para evitar o overhead de open/close
+    por amostra. Handles são criados lazily — compatível com num_workers>0
+    (cada worker abre seus próprios handles após o spawn).
+    """
+
     def __init__(self, folder_path: str):
         search_pattern = os.path.join(folder_path, "**", "*.h5")
         shard_files = sorted(glob.glob(search_pattern, recursive=True))
@@ -148,19 +156,30 @@ class ShardedH5Dataset_withSSD(torch.utils.data.Dataset):
         if not self._index:
             raise RuntimeError("Nenhuma amostra válida encontrada nos shards.")
 
+        self._handles: dict[str, h5py.File] = {}
         print(f"[ShardedH5Dataset_withSSD] {len(self._index):,} amostras em {len(shard_files)} shards")
+
+    def _get_handle(self, path: str) -> h5py.File:
+        if path not in self._handles:
+            self._handles[path] = h5py.File(path, "r")
+        return self._handles[path]
 
     def __len__(self) -> int:
         return len(self._index)
 
     def __getitem__(self, idx):
-        shard_path, local_idx = self._index[idx]  # ← path direto, sem self._shards
+        shard_path, local_idx = self._index[idx]
+        f = self._get_handle(shard_path)
+        visual = f["visual_feats"][local_idx]   # [1024, 768]
+        text   = f["text_feats"][local_idx]     # [1, 4096]
+        return torch.from_numpy(visual.copy()), torch.from_numpy(text.copy())
 
-        with h5py.File(shard_path, "r") as f:      # ← abre o arquivo pelo path
-            visual = f["visual_feats"][local_idx]   # [1024, 768]
-            text   = f["text_feats"][local_idx]     # [1, 4096]
-
-        return torch.from_numpy(visual), torch.from_numpy(text)
+    def __del__(self):
+        for f in self._handles.values():
+            try:
+                f.close()
+            except Exception:
+                pass
         
         
 class ShardedH5Dataset_withHD(Dataset):
@@ -341,26 +360,40 @@ def create_all_dataloaders( #USAR SE TIVER MEMÓRIA VRAM O SUFICIENTE
     print(f"  Validação: {len(val_dataset)} imagens")
     print(f"  Teste: {len(test_dataset)} imagens")
     
-    train_loader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True, 
-        num_workers=num_workers, collate_fn=collate_fn, pin_memory=True
-    )
     
-    val_loader = DataLoader(
-        val_dataset, batch_size=batch_size, shuffle=False, 
-        num_workers=num_workers, collate_fn=collate_fn, pin_memory=True
-    )
-    
-    test_loader = DataLoader(
-        test_dataset, batch_size=batch_size, shuffle=False, 
-        num_workers=num_workers, collate_fn=collate_fn, pin_memory=True
-    )
     
     if t == "all":
+        train_loader = DataLoader(
+        train_dataset, batch_size=batch_size, shuffle=True, 
+        num_workers=num_workers, collate_fn=collate_fn, pin_memory=True
+        )
+    
+        val_loader = DataLoader(
+            val_dataset, batch_size=batch_size, shuffle=False, 
+            num_workers=num_workers, collate_fn=collate_fn, pin_memory=True
+        )
+        
+        test_loader = DataLoader(
+            test_dataset, batch_size=batch_size, shuffle=False, 
+            num_workers=num_workers, collate_fn=collate_fn, pin_memory=True
+        )
         return train_loader, val_loader, test_loader
     elif t == "train":
+        train_loader = DataLoader(
+        train_dataset, batch_size=batch_size, shuffle=True, 
+        num_workers=num_workers, collate_fn=collate_fn, pin_memory=True
+        )
+    
+        val_loader = DataLoader(
+            val_dataset, batch_size=batch_size, shuffle=False, 
+            num_workers=num_workers, collate_fn=collate_fn, pin_memory=True
+        )
         return train_loader, val_loader
     elif t == "test":
+        test_loader = DataLoader(
+            test_dataset, batch_size=batch_size, shuffle=False, 
+            num_workers=num_workers, collate_fn=collate_fn, pin_memory=True
+        )
         return test_loader
     
 
@@ -424,33 +457,3 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
         
-"""
-Dataset carregado! Total de imagens encontradas: 7794796
-Divisão concluída:
-  Treino: 100000 imagens
-  Validação: 779479 imagens
-  Teste: 77947 imagens
-
-==============================
-INICIANDO TESTE DOS LOADERS
-==============================
-
---- Testando Loader: TREINO ---
-  [OK] Imagens Shape: torch.Size([4, 3, 256, 256])
-  [OK] Texto Raw Detectado. Quantidade: 4
-  [OK] Exemplo de Legenda: Busseto Diced Pancetta, 5 Oz (Pack of 12...
-
---- Testando Loader: VALIDAÇÃO ---
-  [OK] Imagens Shape: torch.Size([4, 3, 256, 256])
-  [OK] Texto Raw Detectado. Quantidade: 4
-  [OK] Exemplo de Legenda: Inspirierende Designs für kleines Badezimmer umges...
-
---- Testando Loader: TESTE ---
-  [OK] Imagens Shape: torch.Size([4, 3, 256, 256])
-  [OK] Texto Raw Detectado. Quantidade: 4
-  [OK] Exemplo de Legenda: Sunset Edition by Yoskay Yamamoto Limited Mighty J...
-
-==============================
-TESTE FINALIZADO COM SUCESSO!
-==============================
-"""

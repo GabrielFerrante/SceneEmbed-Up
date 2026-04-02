@@ -114,7 +114,8 @@ def train_lora_projection(epochs: int = 10, batch_size: int = 2) -> None:
                     mean_entropy = entropy.mean()
                     entropy_reg  = (mean_entropy - TARGET_ENTROPY) ** 2
 
-                    loss = contrastive_loss + 0.5 * loss_vg + LAMBDA_ENTROPY * entropy_reg
+                    # Loss final com lambda corrigido
+                    loss = contrastive_loss +  LAMBDA_ENTROPY * entropy_reg
                     # ────────────────────────────────────────────────────────
 
                     with torch.no_grad():

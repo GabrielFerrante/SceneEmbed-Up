@@ -32,11 +32,8 @@ class LoRACrossAttentionAligner(nn.Module):
     def __init__(self, visual_dim: int, text_dim: int, rank: int = 16, num_heads: int = 8) -> None:
         super().__init__()
 
-        # 1. Projeção base da imagem (congelada)
+        # 1. Projeção base da imagem
         self.visual_proj = nn.Linear(visual_dim, text_dim)
-        self.visual_proj.weight.requires_grad = False
-        if self.visual_proj.bias is not None:
-            self.visual_proj.bias.requires_grad = False
 
         # 2. Camada de Cross-Attention
         # Observação: algumas versões do PyTorch não suportam o argumento

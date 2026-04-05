@@ -1,0 +1,20 @@
+{
+    "timestamp": "2026-04-04T13:56:21.361377",
+    "experiment_info": {
+        "model": "LoRA-Aligner-v1",
+        "visual_encoder": "DinoV3",
+        "text_encoder": "Qwen-7B-Embedder",
+        "upsampler": "AnyUp"
+    },
+    "metrics": {
+        "I2T_Recall@1": 0.08860000222921371,
+        "T2I_Recall@1": 0.6287000179290771,
+        "Mean_Recall@1": 0.35865001007914543,
+        "I2T_Recall@5": 0.28209999203681946,
+        "T2I_Recall@5": 0.8781999945640564,
+        "Mean_Recall@5": 0.5801499933004379,
+        "I2T_Recall@10": 0.42750000953674316,
+        "T2I_Recall@10": 0.9358999729156494,
+        "Mean_Recall@10": 0.6816999912261963
+    }
+}

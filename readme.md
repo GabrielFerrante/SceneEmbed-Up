@@ -11,16 +11,20 @@ Pipeline de pesquisa que combina **DINOv3** (encoder visual com upsampling HR) +
 ```
 Imagem
   └─► DinoSceneEncoder (ViT-B/16 + AnyUp)
-        ├─ CLS token    [1, 768]            ← representação global
-        └─ HR patches   [B, 768, H, W]
+        ├─ CLS token    [1, 768]              ← representação global
+        └─ HR patches   [B, 768, H_orig, W_orig]
               │
-              │  pool 32×32 + flatten
+              │  adaptive_avg_pool2d(32×32)
+              ▼
+          [B, 768, 32, 32]
+              │
+              │  reshape + transpose (flatten)
               ▼
           [B, 1024, 768]
               │
               ▼
   LoRACrossAttentionAligner
-    visual_proj (frozen) + LoRA (rank=16)
+    visual_proj (frozen) + LoRA (rank=64)
     CrossAttention: Q=text, K=V=visual
               │
               ▼
@@ -45,7 +49,7 @@ Scene Graph         Knowledge Graph
 
 - **Encoder visual de alta resolução:** DINOv3 ViT-B/16 com upsampling por [AnyUp](https://github.com/wimmerth/anyup) ou FeatUp (JBU Stack), preservando detalhes espaciais finos.
 - **Encoder textual de alta capacidade:** Qwen3-Embedding-8B com mean pooling e instrução de tarefa contextual.
-- **Aligner com LoRA:** Projeção visual congelada + adaptadores LoRA treináveis (~200K params), cross-attention assimétrico texto→visual.
+- **Aligner com LoRA:** Projeção visual congelada + adaptadores LoRA treináveis (rank=64, ~200K params), cross-attention assimétrico texto→visual.
 - **Scene Graph generativo:** Detecção de objetos por thresholding de similaridade + inferência de relações direcionais via cross-attention entre nós.
 - **Knowledge Graph expansivo:** Extração de fatos taxonômicos (`is_a`) via prompting estruturado do Qwen3.
 - **Pipeline de dados COYO-700M:** Suporte a ~15M imagens com dataloaders eficientes via shards HDF5 com buffer rotativo em RAM.
@@ -190,14 +194,14 @@ Armazenamento: 7Gb por shard de 5k amostras (compressão gzip).
 ## Função de Loss
 
 ```
-loss = contrastive_loss + 0.5 × loss_vg + 0.05 × entropy_reg
+loss = contrastive_loss + 0.05 × entropy_reg
 ```
 
 | Componente          | Descrição                                                        |
 |---------------------|------------------------------------------------------------------|
-| `contrastive_loss`  | InfoNCE simétrico entre visual refinado e texto (τ=0.07)        |
-| `loss_vg`           | InfoNCE sobre média dos patches antes do cross-attention        |
+| `contrastive_loss`  | InfoNCE simétrico entre visual refinado e texto (τ=0.05)        |
 | `entropy_reg`       | `(mean_entropy - 1.5)²` → foca atenção em ~4-5 patches/head    |
+| `loss_vg` *(log)*   | InfoNCE sobre média dos patches antes do cross-attention (apenas monitoramento via TensorBoard, não participa do backward) |
 
 ---
 

@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python train_with_h5.py)",
+      "Bash(python eval_with_h5.py)",
+      "Bash(python eval_with_images.py)"
+    ]
+  }
+}

@@ -82,7 +82,7 @@ class SceneGraphGenerator:
 
         # 4. Inferência de Relações Direcionais
         rel_queries = self.embedder.embed_components([candidate_relations], normalize=False)
-        rel_embeddings_refined, _ = self.aligner(visual_input, rel_queries)
+        rel_embeddings_refined, _, _ = self.aligner(visual_input, rel_queries)
 
         for node_a in scene_graph["nodes"]:
             for node_b in scene_graph["nodes"]:

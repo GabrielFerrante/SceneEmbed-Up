@@ -387,10 +387,11 @@ def extrair_candidatos_llm(
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # --- Modelos ---
-    dino = DinoSceneEncoder(device=device)
-    qwen = QwenSceneEmbedder(device=device)
+    # ── Flags de controle ────────────────────────────────────────────────
+    RUN_RECALL = False      # Recall@K — só precisa do aligner + H5
+    RUN_SG_KG  = True     # SG/KG   — precisa de DINO + Qwen (pesado)
 
+    # ── Aligner (sempre necessário) ──────────────────────────────────────
     aligner = LoRACrossAttentionAligner(visual_dim=768, text_dim=4096, rank=64)
 
     weights_path = "checkpoints/best_aligner.pth"
@@ -405,136 +406,145 @@ if __name__ == "__main__":
 
     aligner.to(device).to(torch.bfloat16).eval()
 
-    # --- Generators ---
-    generator_sg = SceneGraphGenerator(
-        dino_encoder=dino,
-        qwen_embedder=qwen,
-        aligner=aligner,
-        threshold=0.3,
-    )
-    generator_kg = KnowledgeGraphGenerator(
-        qwen_model=qwen.model,
-        qwen_tokenizer=qwen.tokenizer,
-    )
+    # =====================================================================
+    # 1. Recall@K bidirecional (I2T + T2I + Mean) — leve, só aligner + H5
+    # =====================================================================
+    recall_results: Dict[str, float] = {}
 
-    evaluator = SceneGraphEvaluator(generator_sg, device=device)
+    if RUN_RECALL:
+        test_h5_ds = ShardedH5Dataset_withSSD("G:/coyo/embeds/test_anyup/")
+        test_h5_loader = DataLoader(
+            test_h5_ds, batch_size=128, shuffle=False,
+            pin_memory=True, num_workers=4, prefetch_factor=4, persistent_workers=True,
+        )
 
-    # --- Dataloaders ---
-    test_h5_ds = ShardedH5Dataset_withSSD("G:/coyo/embeds/test_anyup/")
-    test_h5_loader = DataLoader(
-        test_h5_ds, batch_size=16, shuffle=False, pin_memory=True
-    )
+        # Smoke test
+        batch_h5 = next(iter(test_h5_loader))
+        print(f"  h5 loader — visual: {batch_h5[0].shape}, texto: {batch_h5[1].shape}")
 
-    test_img_loader = create_all_dataloaders(
-        "F:/COYO/coyo/extracted",
-        batch_size=8,
-        num_workers=4,
-        t="test",
-    )
+        # Avaliador leve — não precisa de DINO/Qwen
+        evaluator = SceneGraphEvaluator.__new__(SceneGraphEvaluator)
+        evaluator.device = device
+        evaluator.dtype = torch.bfloat16
+        evaluator.generator = type("_Stub", (), {"aligner": aligner})()
 
-    # Smoke tests rápidos antes da avaliação longa
-    print("Testando dataloaders...")
-    batch_img = next(iter(test_img_loader))
-    print(f"  img loader  — visual: {batch_img[0].shape}, texto: {batch_img[1][:2]}")
-    batch_h5 = next(iter(test_h5_loader))
-    print(f"  h5  loader  — visual: {batch_h5[0].shape}, texto: {batch_h5[1].shape}")
-    print("Dataloaders OK\n")
+        print("\n--- Avaliando Alinhamento (Recall@K Bidirecional) ---")
+        recall_results = evaluator.evaluate_projection(
+            test_h5_loader,
+            k_values=[1, 5, 10],
+            chunk_size=512,
+            run_diagnostics=True,
+        )
 
-    # -----------------------------------------------------------------------
-    # 1. Recall@K bidirecional (I2T + T2I + Mean)
-    # -----------------------------------------------------------------------
-    print("\n--- Avaliando Alinhamento (Recall@K Bidirecional) ---")
-    recall_results = evaluator.evaluate_projection(
-        test_h5_loader,
-        k_values=[1, 5, 10],
-        chunk_size=512,
-        run_diagnostics=True,
-    )
-
-    print("\nResultados:")
-    # Agrupa por K para leitura mais clara
-    for k in [1, 5, 10]:
-        i2t = recall_results.get(f"I2T_Recall@{k}", None)
-        t2i = recall_results.get(f"T2I_Recall@{k}", None)
-        mean = recall_results.get(f"Mean_Recall@{k}", None)
-        if i2t is not None:
-            print(
-                f"  @{k:2d}  I2T={i2t:.4f}  T2I={t2i:.4f}  Mean={mean:.4f}"
-            )
-
-    salvar_recall_results(recall_results)
-
-    # -----------------------------------------------------------------------
-    # 2. Geração de SG/KG e métricas estruturais
-    # -----------------------------------------------------------------------
-    print("\nIniciando Processamento do Dataset de Teste (SG/KG)...")
-
-    all_coverages: List[float] = []
-    all_expansions: List[float] = []
-    all_hypernym_means: List[float] = []
-    all_node_counts: List[int] = []
-    all_edge_counts: List[int] = []
-
-    try:
-        for batch_idx, (images, texts) in enumerate(
-            tqdm(test_img_loader, desc="Processando Teste (SG/KG)")
-        ):
-            for i, img_tensor in enumerate(images):
-                label_real = texts[i]
-
-                candidatos_dinamicos = extrair_candidatos_llm(label_real, qwen)
-                lista_candidatos = list(
-                    set(candidatos_dinamicos + ["person", "vehicle", "object"])
-                )
-
-                sg_result = generator_sg.generate(
-                    img_tensor,
-                    lista_candidatos,
-                    ["near", "mounted on"],
-                )
-                kg_result = generator_kg.generate_from_scene(sg_result)
-
-                comparativo = evaluate_compare_graphs(sg_result, kg_result)
-                all_coverages.append(comparativo["semantic_coverage"])
-
-                expansion_result = evaluate_expansion(sg_result, kg_result)
-                all_expansions.append(expansion_result["expansion_ratio"])
-
-                mean_hypernym = compute_mean_hypernym_count(sg_result, kg_result)
-                all_hypernym_means.append(mean_hypernym["mean_hypernym_count"])
-
-                all_node_counts.append(len(sg_result["nodes"]))
-                all_edge_counts.append(len(sg_result["edges"]))
-
-                nome_arquivo = f"resultado_batch{batch_idx}_img{i}.json"
-                salvar_grafos_json(
-                    sg_result,
-                    kg_result,
-                    comparativo,
-                    filename=nome_arquivo,
-                )
-
-        def safe_mean(values: List[float]) -> float:
-            return sum(values) / len(values) if values else 0.0
-
-        print("\nTeste Finalizado!")
-        print("=" * 55)
-        print(f"  Recall Results:")
+        print("\nResultados:")
         for k in [1, 5, 10]:
             i2t = recall_results.get(f"I2T_Recall@{k}", None)
+            t2i = recall_results.get(f"T2I_Recall@{k}", None)
+            mean = recall_results.get(f"Mean_Recall@{k}", None)
             if i2t is not None:
-                print(
-                    f"    @{k:2d}  I2T={i2t:.4f}  "
-                    f"T2I={recall_results[f'T2I_Recall@{k}']:.4f}  "
-                    f"Mean={recall_results[f'Mean_Recall@{k}']:.4f}"
-                )
-        print(f"  Cobertura Semântica Média : {safe_mean(all_coverages):.4f}")
-        print(f"  Expansion Ratio Médio     : {safe_mean(all_expansions):.4f}")
-        print(f"  Mean Hypernym Count       : {safe_mean(all_hypernym_means):.4f}")
-        print(f"  Nós Médios por SG         : {safe_mean(all_node_counts):.2f}")
-        print(f"  Relações Médias por SG    : {safe_mean(all_edge_counts):.2f}")
-        print("=" * 55)
+                print(f"  @{k:2d}  I2T={i2t:.4f}  T2I={t2i:.4f}  Mean={mean:.4f}")
 
-    except Exception as e:
-        print(f"Erro durante o processamento: {e}")
-        raise
+        salvar_recall_results(recall_results)
+
+        # Libera workers e handles do H5 antes de carregar modelos pesados
+        del test_h5_loader, test_h5_ds
+        torch.cuda.empty_cache()
+
+    # =====================================================================
+    # 2. Geração de SG/KG e métricas estruturais — pesado (DINO + Qwen)
+    # =====================================================================
+    if RUN_SG_KG:
+        print("\nCarregando DINO + Qwen para SG/KG...")
+        dino = DinoSceneEncoder(device=device)
+        qwen = QwenSceneEmbedder(device=device)
+
+        generator_sg = SceneGraphGenerator(
+            dino_encoder=dino,
+            qwen_embedder=qwen,
+            aligner=aligner,
+            threshold=0.3,
+        )
+        generator_kg = KnowledgeGraphGenerator(
+            qwen_model=qwen.model,
+            qwen_tokenizer=qwen.tokenizer,
+        )
+
+        test_img_loader = create_all_dataloaders(
+            "F:/COYO/coyo/extracted",
+            batch_size=8,
+            num_workers=4,
+            t="test",
+        )
+
+        print("Iniciando Processamento do Dataset de Teste (SG/KG)...")
+
+        all_coverages: List[float] = []
+        all_expansions: List[float] = []
+        all_hypernym_means: List[float] = []
+        all_node_counts: List[int] = []
+        all_edge_counts: List[int] = []
+
+        try:
+            for batch_idx, (images, texts) in enumerate(
+                tqdm(test_img_loader, desc="Processando Teste (SG/KG)")
+            ):
+                for i, img_tensor in enumerate(images):
+                    label_real = texts[i]
+
+                    candidatos_dinamicos = extrair_candidatos_llm(label_real, qwen)
+                    lista_candidatos = list(
+                        set(candidatos_dinamicos + ["person", "vehicle", "object"])
+                    )
+
+                    sg_result = generator_sg.generate(
+                        img_tensor,
+                        lista_candidatos,
+                        ["near", "mounted on"],
+                    )
+                    kg_result = generator_kg.generate_from_scene(sg_result)
+
+                    comparativo = evaluate_compare_graphs(sg_result, kg_result)
+                    all_coverages.append(comparativo["semantic_coverage"])
+
+                    expansion_result = evaluate_expansion(sg_result, kg_result)
+                    all_expansions.append(expansion_result["expansion_ratio"])
+
+                    mean_hypernym = compute_mean_hypernym_count(sg_result, kg_result)
+                    all_hypernym_means.append(mean_hypernym["mean_hypernym_count"])
+
+                    all_node_counts.append(len(sg_result["nodes"]))
+                    all_edge_counts.append(len(sg_result["edges"]))
+
+                    nome_arquivo = f"resultado_batch{batch_idx}_img{i}.json"
+                    salvar_grafos_json(
+                        sg_result,
+                        kg_result,
+                        comparativo,
+                        filename=nome_arquivo,
+                    )
+
+            def safe_mean(values: List[float]) -> float:
+                return sum(values) / len(values) if values else 0.0
+
+            print("\nTeste Finalizado!")
+            print("=" * 55)
+            if recall_results:
+                print(f"  Recall Results:")
+                for k in [1, 5, 10]:
+                    i2t = recall_results.get(f"I2T_Recall@{k}", None)
+                    if i2t is not None:
+                        print(
+                            f"    @{k:2d}  I2T={i2t:.4f}  "
+                            f"T2I={recall_results[f'T2I_Recall@{k}']:.4f}  "
+                            f"Mean={recall_results[f'Mean_Recall@{k}']:.4f}"
+                        )
+            print(f"  Cobertura Semântica Média : {safe_mean(all_coverages):.4f}")
+            print(f"  Expansion Ratio Médio     : {safe_mean(all_expansions):.4f}")
+            print(f"  Mean Hypernym Count       : {safe_mean(all_hypernym_means):.4f}")
+            print(f"  Nós Médios por SG         : {safe_mean(all_node_counts):.2f}")
+            print(f"  Relações Médias por SG    : {safe_mean(all_edge_counts):.2f}")
+            print("=" * 55)
+
+        except Exception as e:
+            print(f"Erro durante o processamento: {e}")
+            raise

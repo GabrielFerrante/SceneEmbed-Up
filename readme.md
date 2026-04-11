@@ -4,6 +4,9 @@
 
 Pipeline de pesquisa que combina **DINOv3** (encoder visual com upsampling HR) + **Qwen3-Embedding-8B** (encoder textual) + **LoRA Cross-Attention Aligner** para aprender um espaço de embeddings compartilhado e gerar Scene Graphs semânticos enriquecidos com Knowledge Graphs.
 
+- Retrieval-based open-vocabulary scene graph generation via lightweight cross-attention alignment between frozen vision and language foundation models, with LLM-driven knowledge graph expansion.
+
+- Post-hoc contrastive alignment via LoRA cross-attention bridge between frozen high-resolution vision (DINOv3 + AnyUp) and language (Qwen3-8B) foundation models.
 ---
 
 ## Visão Geral da Arquitetura

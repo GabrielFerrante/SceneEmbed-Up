@@ -6,11 +6,12 @@ import os
 from datetime import datetime
 
 class SceneGraphGenerator:
-    def __init__(self, dino_encoder, qwen_embedder, aligner, threshold=0.3):
+    def __init__(self, dino_encoder, qwen_embedder, aligner, threshold=0.3, edge_threshold=0.95):
         self.encoder = dino_encoder
         self.embedder = qwen_embedder
         self.aligner = aligner
         self.threshold = threshold
+        self.edge_threshold = edge_threshold
         self.device = next(aligner.parameters()).device
         self.dtype = qwen_embedder.dtype
         
@@ -52,7 +53,11 @@ class SceneGraphGenerator:
 
         # 2. Refinamento de Nós com Pesos de Atenção
         node_queries = self.embedder.embed_components([candidate_nodes], normalize=False)
-        
+
+        # Cast para o dtype do aligner (bfloat16)
+        visual_input = visual_input.to(self.dtype)
+        node_queries = node_queries.to(self.dtype)
+
         # ALTERAÇÃO 1: Recebendo embeddings E pesos do Aligner
         node_embeddings_refined, node_attn_weights, _ = self.aligner(visual_input, node_queries)
 
@@ -82,6 +87,7 @@ class SceneGraphGenerator:
 
         # 4. Inferência de Relações Direcionais
         rel_queries = self.embedder.embed_components([candidate_relations], normalize=False)
+        rel_queries = rel_queries.to(self.dtype)
         rel_embeddings_refined, _, _ = self.aligner(visual_input, rel_queries)
 
         for node_a in scene_graph["nodes"]:
@@ -99,7 +105,7 @@ class SceneGraphGenerator:
                     # Score de validação da aresta
                     rel_score = calculate_retrieval_score(v_rel_aligned, pair_context)
                     
-                    if rel_score > 0.55: # Threshold levemente ajustado para atenção
+                    if rel_score > self.edge_threshold:
                         scene_graph["edges"].append({
                             "source": int(node_a["id"]),
                             "relation": rel_label,
@@ -111,32 +117,116 @@ class SceneGraphGenerator:
     
 
 class KnowledgeGraphGenerator:
-    def __init__(self, qwen_model, qwen_tokenizer):
-        """
-        Utiliza a LLM (Qwen) para extrair fatos sobre os objetos detectados.
-        """
+    """
+    Gera Knowledge Graph a partir de um Scene Graph.
+
+    Suporta dois modos:
+    - **Cache** (taxonomy_cache): lookup instantâneo de taxonomias pré-geradas
+      por data/extract_candidates.py. Não requer modelo causal.
+    - **LLM** (qwen_model + qwen_tokenizer): geração online via modelo causal.
+
+    Relacoes suportadas (VALID_RELATIONS):
+    - is_a: taxonomia ("dog | is_a | animal")
+    - part_of: meronomia ("wheel | part_of | car")
+    - made_of: material ("table | made_of | wood")
+    - used_for: funcao ("knife | used_for | cutting")
+    - has_property: atributo ("fire | has_property | hot")
+
+    Parameters
+    ----------
+    qwen_model:
+        Modelo causal para geração (opcional se taxonomy_cache fornecido).
+    qwen_tokenizer:
+        Tokenizer do modelo causal (opcional se taxonomy_cache fornecido).
+    taxonomy_cache:
+        Dict label → lista de {sub, rel, obj} pré-extraído.
+    """
+
+    # Relacoes permitidas no knowledge graph
+    VALID_RELATIONS: list[str] = [
+        "is_a",         # taxonomia: "dog | is_a | animal"
+        "part_of",      # meronomia: "wheel | part_of | car"
+        "made_of",      # material: "table | made_of | wood"
+        "used_for",     # funcao: "knife | used_for | cutting"
+        "has_property", # atributo: "fire | has_property | hot"
+    ]
+
+    # Mapa para fuzzy match: variantes comuns -> relacao canonica
+    _RELATION_ALIASES: dict[str, str] = {
+        "is a": "is_a",
+        "isa": "is_a",
+        "is_a": "is_a",
+        "part of": "part_of",
+        "partof": "part_of",
+        "part_of": "part_of",
+        "made of": "made_of",
+        "madeof": "made_of",
+        "made_of": "made_of",
+        "made from": "made_of",
+        "used for": "used_for",
+        "usedfor": "used_for",
+        "used_for": "used_for",
+        "used to": "used_for",
+        "has property": "has_property",
+        "hasproperty": "has_property",
+        "has_property": "has_property",
+        "has attribute": "has_property",
+        "has_attribute": "has_property",
+    }
+
+    def __init__(self, qwen_model=None, qwen_tokenizer=None, taxonomy_cache: dict | None = None):
         self.model = qwen_model
         self.tokenizer = qwen_tokenizer
-        self.device = next(qwen_model.parameters()).device
+        self.taxonomy_cache = taxonomy_cache or {}
+        if qwen_model is not None:
+            self.device = next(qwen_model.parameters()).device
 
-    def expand_node(self, node_label: str, max_facts: int = 3):
+    def _normalize_relation(self, raw_rel: str) -> str | None:
         """
-        Consulta o conhecimento do Qwen sobre um objeto específico.
-        """
-        prompt = f"Describe three short, fundamental facts about the object '{node_label}' in the format: Subject | Relation | Object. Example: Cat | is a | animal."
-        
-        # Simulação de inferência (ajuste conforme a chamada do seu Qwen)
-        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
-        outputs = self.model.generate(**inputs, max_new_tokens=50)
-        response = self.tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
+        Normaliza uma relacao extraida do LLM para a forma canonica.
 
-        
-        # Aqui você faria o parsing da string para extrair as tripletas
-        return response
-    
+        Faz fuzzy match via alias table. Retorna None se a relacao
+        nao puder ser mapeada para nenhuma relacao valida.
+
+        Parameters
+        ----------
+        raw_rel : str
+            Relacao bruta extraida do output do LLM (ex: "is a", "part_of").
+
+        Returns
+        -------
+        str | None
+            Relacao canonica (ex: "is_a") ou None se invalida.
+        """
+        cleaned = raw_rel.strip().lower()
+        # Lookup direto no alias table
+        if cleaned in self._RELATION_ALIASES:
+            return self._RELATION_ALIASES[cleaned]
+        # Tenta remover espacos/underscores extras
+        no_spaces = cleaned.replace(" ", "").replace("_", "")
+        for alias, canonical in self._RELATION_ALIASES.items():
+            if alias.replace(" ", "").replace("_", "") == no_spaces:
+                return canonical
+        return None
+
     @torch.no_grad()
-    def generate_from_scene(self, scene_graph: dict):
+    def generate_from_scene(self, scene_graph: dict) -> dict:
+        """
+        Gera knowledge graph a partir de um scene graph detectado.
 
+        Parameters
+        ----------
+        scene_graph : dict
+            Dict com chave 'nodes' (lista de dicts com 'label').
+
+        Returns
+        -------
+        dict
+            Knowledge graph com chaves:
+            - 'entities': list[str] — entidades unicas
+            - 'factual_edges': list[dict] — cada dict tem {sub: str, rel: str, obj: str}
+              onde rel pertence a VALID_RELATIONS
+        """
         knowledge_graph = {
             "entities": set(),
             "factual_edges": []
@@ -148,59 +238,96 @@ class KnowledgeGraphGenerator:
         ))
 
         for label in detected_labels:
-
             knowledge_graph["entities"].add(label)
 
-            prompt = (
-                f"<|im_start|>system\n"
-                f"List exactly 2 universal, taxonomy-level facts about '{label}'. "
-                f"Avoid opinions, abilities, or cultural associations."
-                f"<|im_end|>\n"
-                f"<|im_start|>user\n"
-                f"Use only class or category relations. "
-                f"Format strictly as: Subject | is_a | Object. "
-                f"Always use exactly the word '{label}' as the Subject."
-                f"<|im_end|>\n"
-                f"<|im_start|>assistant\n"
-            )
-
-            inputs = self.tokenizer(
-                prompt,
-                return_tensors="pt"
-            ).to(self.device)
-
-            outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=40,
-                temperature=0.1
-            )
-
-            response = self.tokenizer.decode(
-                outputs[0][inputs.input_ids.shape[1]:],
-                skip_special_tokens=True
-            )
-
-            for line in response.split('\n'):
-                if "|" not in line:
-                    continue
-
-                parts = [p.strip().lower() for p in line.split("|")]
-
-                if len(parts) != 3:
-                    continue
-
-                _, rel, obj = parts
-
-                rel = "is_a"  # força consistência
-
-                knowledge_graph["factual_edges"].append({
-                    "sub": label,
-                    "rel": rel,
-                    "obj": obj
-                })
-
-                knowledge_graph["entities"].add(obj)
+            # Tenta cache primeiro, senão usa LLM
+            if label in self.taxonomy_cache:
+                for edge in self.taxonomy_cache[label]:
+                    knowledge_graph["factual_edges"].append(edge)
+                    knowledge_graph["entities"].add(edge["obj"])
+            elif self.model is not None:
+                self._generate_facts_llm(label, knowledge_graph)
+            # Se não tem cache nem modelo, pula (sem fatos para este label)
 
         knowledge_graph["entities"] = list(knowledge_graph["entities"])
-
         return knowledge_graph
+
+    @torch.no_grad()
+    def _generate_facts_llm(self, label: str, knowledge_graph: dict) -> None:
+        """
+        Gera fatos multi-relacao via modelo causal (fallback quando não há cache).
+
+        Pede ao LLM fatos usando as relacoes definidas em VALID_RELATIONS.
+        Faz parsing e validacao de cada relacao extraida.
+
+        Parameters
+        ----------
+        label : str
+            Label da entidade detectada no scene graph.
+        knowledge_graph : dict
+            Knowledge graph sendo construido (modificado in-place).
+            Chaves: 'entities' (set[str]), 'factual_edges' (list[dict]).
+        """
+        relations_str = ", ".join(self.VALID_RELATIONS)
+        examples = (
+            "dog | is_a | animal\n"
+            "wheel | part_of | car\n"
+            "table | made_of | wood\n"
+            "knife | used_for | cutting\n"
+            "fire | has_property | hot"
+        )
+
+        prompt = (
+            f"<|im_start|>system\n"
+            f"List exactly 5 universal, factual statements about '{label}'. "
+            f"Avoid opinions, abilities, or cultural associations. "
+            f"Use ONLY these relations: {relations_str}.\n"
+            f"Examples:\n{examples}"
+            f"<|im_end|>\n"
+            f"<|im_start|>user\n"
+            f"Format strictly as: Subject | relation | Object\n"
+            f"Always use exactly the word '{label}' as the Subject. "
+            f"Use one line per fact. Pick the most informative relation for each fact."
+            f"<|im_end|>\n"
+            f"<|im_start|>assistant\n"
+        )
+
+        inputs = self.tokenizer(
+            prompt,
+            return_tensors="pt"
+        ).to(self.device)
+
+        outputs = self.model.generate(
+            **inputs,
+            max_new_tokens=100,
+            temperature=0.1
+        )
+
+        response = self.tokenizer.decode(
+            outputs[0][inputs.input_ids.shape[1]:],
+            skip_special_tokens=True
+        )
+
+        for line in response.split('\n'):
+            if "|" not in line:
+                continue
+
+            parts = [p.strip().lower() for p in line.split("|")]
+
+            if len(parts) != 3:
+                continue
+
+            _sub, raw_rel, obj = parts
+
+            # Valida e normaliza a relacao via fuzzy match
+            rel = self._normalize_relation(raw_rel)
+            if rel is None:
+                continue  # Relacao desconhecida, descarta o fato
+
+            knowledge_graph["factual_edges"].append({
+                "sub": label,
+                "rel": rel,
+                "obj": obj
+            })
+
+            knowledge_graph["entities"].add(obj)

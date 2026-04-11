@@ -100,3 +100,48 @@ def salvar_grafos_json(
     print(f" Dados gravados em {path}")
     return path
 
+
+def salvar_resultados_sg(
+    samples: list[Dict[str, Any]],
+    aggregate_metrics: Dict[str, float],
+    filename: str = "sg_kg_results.json",
+    directory: str = "results",
+) -> str:
+    """
+    Persiste todos os resultados de SG/KG em um único JSON.
+
+    Parameters
+    ----------
+    samples:
+        Lista de dicts, cada um com scene_graph, knowledge_graph e metrics.
+    aggregate_metrics:
+        Métricas agregadas (médias) do eval completo.
+    filename:
+        Nome do arquivo de saída.
+    directory:
+        Diretório base.
+
+    Returns
+    -------
+    str
+        Caminho completo do arquivo JSON salvo.
+    """
+    os.makedirs(directory, exist_ok=True)
+
+    data_to_save = {
+        "metadata": {
+            "timestamp": datetime.now().isoformat(),
+            "num_samples": len(samples),
+            "aggregate_metrics": aggregate_metrics,
+        },
+        "samples": samples,
+    }
+    data_to_save = _to_jsonable(data_to_save)
+
+    path = os.path.join(directory, filename)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data_to_save, f, indent=4, ensure_ascii=False)
+
+    print(f" Resultados SG/KG gravados em {path} ({len(samples)} amostras)")
+    return path
+

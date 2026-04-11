@@ -97,40 +97,82 @@ def compute_mean_hypernym_count(scene_g: Mapping[str, Any], kg_g: Mapping[str, A
 def evaluate_compare_graphs(scene_g: Mapping[str, Any], kg_g: Mapping[str, Any]) -> Dict[str, float]:
     """
     Compara Scene Graph com Knowledge Graph em termos estruturais/semânticos.
+
+    Métricas
+    --------
+    semantic_coverage:
+        Fração dos labels do SG que receberam pelo menos um fato taxonômico
+        no KG (aparecem como `sub` em `factual_edges`). Mede se o KG
+        conseguiu enriquecer os nós da cena com conhecimento.
+    sg_contribution:
+        Fração das entidades do KG que vieram diretamente do SG. Valores
+        baixos indicam KG dominado por expansão (muito conhecimento novo);
+        valores altos indicam pouco enriquecimento.
+    relation_consistency:
+        Fração dos endpoints (sub/obj) das relações do SG que receberam
+        fatos taxonômicos no KG. Mede se o KG "entende" os nós que o SG
+        relaciona, sem exigir que SG e KG usem o mesmo vocabulário de
+        relações.
+    structural_density:
+        Densidade do SG normalizada pelo número de tipos de relação.
+        Resultado em [0, 1] — 1.0 = grafo completo em todos os tipos.
     """
     scene_labels = {node["label"].lower().strip() for node in scene_g.get("nodes", [])}
     kg_entities = {ent.lower().strip() for ent in kg_g.get("entities", [])}
 
+    # ── Semantic coverage: SG nodes que receberam ao menos 1 fato no KG ──
+    sg_with_facts = {
+        str(edge.get("sub", "")).lower().strip()
+        for edge in kg_g.get("factual_edges", [])
+        if edge.get("sub")
+    }
     if len(scene_labels) == 0:
         semantic_coverage = 0.0
     else:
-        semantic_coverage = len(scene_labels.intersection(kg_entities)) / len(scene_labels)
+        semantic_coverage = len(scene_labels.intersection(sg_with_facts)) / len(scene_labels)
 
+    # ── SG contribution: quanto do KG veio do SG (renomeado de entity_recall) ──
     if len(kg_entities) == 0:
-        entity_recall = 0.0
+        sg_contribution = 0.0
     else:
-        entity_recall = len(scene_labels.intersection(kg_entities)) / len(kg_entities)
+        sg_contribution = len(scene_labels.intersection(kg_entities)) / len(kg_entities)
 
+    # ── Relation consistency: endpoints do SG que têm fatos no KG ────────
     sg_relations = set(_iter_sg_triplets(scene_g))
-    kg_relations = set(_iter_kg_triplets(kg_g))
+    sg_endpoints = set()
+    for sub, _, obj in sg_relations:
+        sg_endpoints.add(sub)
+        sg_endpoints.add(obj)
 
-    if len(sg_relations) == 0:
+    kg_classified = {
+        str(edge.get("sub", "")).lower().strip()
+        for edge in kg_g.get("factual_edges", [])
+        if edge.get("sub")
+    }
+
+    if len(sg_endpoints) == 0:
         relation_consistency = 0.0
     else:
-        relation_consistency = len(sg_relations.intersection(kg_relations)) / len(sg_relations)
+        relation_consistency = len(sg_endpoints.intersection(kg_classified)) / len(sg_endpoints)
 
+    # ── Structural density: normalizada pelos tipos de relação ───────────
     num_nodes = len(scene_g.get("nodes", []))
     num_edges = len(scene_g.get("edges", []))
 
     if num_nodes <= 1:
         structural_density = 0.0
     else:
-        max_possible_edges = num_nodes * (num_nodes - 1)
+        num_rel_types = len({
+            str(edge.get("relation", "")).lower().strip()
+            for edge in scene_g.get("edges", [])
+            if edge.get("relation")
+        }) or 1
+        max_possible_edges = num_rel_types * num_nodes * (num_nodes - 1)
         structural_density = num_edges / max_possible_edges
 
     return {
         "semantic_coverage": float(semantic_coverage),
-        "entity_recall": float(entity_recall),
+        "sg_contribution": float(sg_contribution),
         "relation_consistency": float(relation_consistency),
         "structural_density": float(structural_density),
         "num_nodes": float(num_nodes),

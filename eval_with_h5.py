@@ -25,6 +25,7 @@ pré-computados em HDF5 (gerados por embeddings/generate.py).
 
 from __future__ import annotations
 
+import json
 import os
 from typing import Dict, List
 
@@ -38,7 +39,7 @@ from models.encoders.dinov3_extrator import DinoSceneEncoder
 from models.encoders.qwen3_extrator import QwenSceneEmbedder
 from models.SG.generation import KnowledgeGraphGenerator, SceneGraphGenerator
 from torch.utils.data import DataLoader
-from utils.graph_io import salvar_grafos_json
+from utils.graph_io import salvar_resultados_sg
 from utils.metrics_scene_graph import (
     compute_mean_hypernym_count,
     evaluate_compare_graphs,
@@ -345,8 +346,11 @@ def extrair_candidatos_llm(
         Retorna lista vazia em caso de falha de geração.
     """
     prompt = (
-        f"Return only single-word concrete physical objects of {label_real}. "
-        "No verbs. No adjectives. No determiners. Format: word1, word2, word3"
+        f"List only the concrete physical objects present in this scene: {label_real}\n"
+        "Rules: single-word nouns only, no verbs, no adjectives.\n"
+        "Example input: A black cat sitting on a wooden table\n"
+        "Example output: cat, table\n"
+        "Output:"
     )
 
     inputs = embedder.tokenizer(prompt, return_tensors="pt").to(embedder.device)
@@ -454,6 +458,22 @@ if __name__ == "__main__":
     # 2. Geração de SG/KG e métricas estruturais — pesado (DINO + Qwen)
     # =====================================================================
     if RUN_SG_KG:
+        # Carrega candidatos e taxonomias pré-extraídos (data/extract_candidates.py)
+        CANDIDATES_PATH = "F:/COYO/candidates_test.json"
+        TAXONOMY_PATH = "F:/COYO/taxonomy_cache.json"
+        for path in [CANDIDATES_PATH, TAXONOMY_PATH]:
+            if not os.path.exists(path):
+                raise FileNotFoundError(
+                    f"Arquivo não encontrado: {path}. "
+                    "Rode primeiro: python data/extract_candidates.py"
+                )
+        with open(CANDIDATES_PATH, "r", encoding="utf-8") as f:
+            candidates_map: Dict[str, List[str]] = json.load(f)
+        with open(TAXONOMY_PATH, "r", encoding="utf-8") as f:
+            taxonomy_cache: Dict[str, list] = json.load(f)
+        print(f"Candidatos carregados: {len(candidates_map)} amostras")
+        print(f"Taxonomias carregadas: {len(taxonomy_cache)} labels")
+
         print("\nCarregando DINO + Qwen para SG/KG...")
         dino = DinoSceneEncoder(device=device)
         qwen = QwenSceneEmbedder(device=device)
@@ -462,12 +482,9 @@ if __name__ == "__main__":
             dino_encoder=dino,
             qwen_embedder=qwen,
             aligner=aligner,
-            threshold=0.3,
+            threshold=0.05,  # Baixo para diagnosticar scores reais
         )
-        generator_kg = KnowledgeGraphGenerator(
-            qwen_model=qwen.model,
-            qwen_tokenizer=qwen.tokenizer,
-        )
+        generator_kg = KnowledgeGraphGenerator(taxonomy_cache=taxonomy_cache)
 
         test_img_loader = create_all_dataloaders(
             "F:/COYO/coyo/extracted",
@@ -476,24 +493,33 @@ if __name__ == "__main__":
             t="test",
         )
 
-        print("Iniciando Processamento do Dataset de Teste (SG/KG)...")
+        MAX_SG_SAMPLES = 50  # Amostras para avaliação de SG/KG
+        print(f"Iniciando Processamento de SG/KG ({MAX_SG_SAMPLES} amostras)...")
 
         all_coverages: List[float] = []
         all_expansions: List[float] = []
         all_hypernym_means: List[float] = []
         all_node_counts: List[int] = []
         all_edge_counts: List[int] = []
+        all_sg_samples: list = []
+        sg_sample_count = 0
 
         try:
             for batch_idx, (images, texts) in enumerate(
                 tqdm(test_img_loader, desc="Processando Teste (SG/KG)")
             ):
-                for i, img_tensor in enumerate(images):
-                    label_real = texts[i]
+                if sg_sample_count >= MAX_SG_SAMPLES:
+                    break
 
-                    candidatos_dinamicos = extrair_candidatos_llm(label_real, qwen)
-                    lista_candidatos = list(
-                        set(candidatos_dinamicos + ["person", "vehicle", "object"])
+                for i, img_tensor in enumerate(images):
+                    if sg_sample_count >= MAX_SG_SAMPLES:
+                        break
+
+                    # Candidatos do JSON pré-extraído (chave = índice como string)
+                    sample_key = str(batch_idx * test_img_loader.batch_size + i)
+                    lista_candidatos = candidates_map.get(
+                        sample_key,
+                        ["person", "vehicle", "object"],  # fallback
                     )
 
                     sg_result = generator_sg.generate(
@@ -501,6 +527,18 @@ if __name__ == "__main__":
                         lista_candidatos,
                         ["near", "mounted on"],
                     )
+
+                    # Diagnóstico: mostra se nós estão sendo filtrados
+                    n_nodes = len(sg_result["nodes"])
+                    n_edges = len(sg_result["edges"])
+                    if n_nodes == 0:
+                        scores_str = "todos abaixo do threshold"
+                    else:
+                        scores_str = ", ".join(
+                            f"{n['label']}={n['score']:.3f}" for n in sg_result["nodes"]
+                        )
+                    print(f"  [SG {sg_sample_count}] nós={n_nodes} edges={n_edges} | {scores_str}")
+
                     kg_result = generator_kg.generate_from_scene(sg_result)
 
                     comparativo = evaluate_compare_graphs(sg_result, kg_result)
@@ -514,17 +552,27 @@ if __name__ == "__main__":
 
                     all_node_counts.append(len(sg_result["nodes"]))
                     all_edge_counts.append(len(sg_result["edges"]))
+                    sg_sample_count += 1
 
-                    nome_arquivo = f"resultado_batch{batch_idx}_img{i}.json"
-                    salvar_grafos_json(
-                        sg_result,
-                        kg_result,
-                        comparativo,
-                        filename=nome_arquivo,
-                    )
+                    all_sg_samples.append({
+                        "sample_id": sg_sample_count - 1,
+                        "metrics": comparativo,
+                        "scene_graph": sg_result,
+                        "knowledge_graph": kg_result,
+                    })
 
             def safe_mean(values: List[float]) -> float:
                 return sum(values) / len(values) if values else 0.0
+
+            if all_sg_samples:
+                agg = {
+                    "semantic_coverage": safe_mean(all_coverages),
+                    "expansion_ratio": safe_mean(all_expansions),
+                    "mean_hypernym_count": safe_mean(all_hypernym_means),
+                    "avg_nodes": safe_mean(all_node_counts),
+                    "avg_edges": safe_mean(all_edge_counts),
+                }
+                salvar_resultados_sg(all_sg_samples, agg)
 
             print("\nTeste Finalizado!")
             print("=" * 55)

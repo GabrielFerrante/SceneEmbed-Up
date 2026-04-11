@@ -7,13 +7,29 @@
       "Bash(git *)",
       "Bash(python -c *)",
       "Bash(pip list)",
-      "Bash(tensorboard --inspect *)"
+      "Bash(tensorboard --inspect *)",
+      "Bash(python -m tensorboard.main *)",
+      "Bash(python embeddings/generate_shards.py *)",
+      "Bash(python data/extract_candidates.py *)",
+      "Bash(python data/test_shards.py)",
+      "Bash(nvidia-smi)"
     ],
     "deny": [
       "Bash(rm -rf *)",
+      "Bash(rm -rf checkpoints*)",
+      "Bash(rm -rf F:/COYO*)",
+      "Bash(rm -rf G:/coyo*)",
       "Bash(git push --force *)",
-      "Bash(git reset --hard *)"
+      "Bash(git reset --hard *)",
+      "Bash(git add tokenDINOV3.json)",
+      "Bash(git add */tokenDINOV3.json)",
+      "Bash(git add data/token-HuggingFace.json)",
+      "Bash(git add CLAUDE.local.md)"
     ]
+  },
+  "env": {
+    "HF_HUB_DISABLE_TELEMETRY": "1",
+    "TOKENIZERS_PARALLELISM": "false"
   },
   "model": {
     "default": "opus"

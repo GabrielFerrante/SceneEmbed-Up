@@ -6,6 +6,17 @@ from datetime import datetime
 from typing import Any, Dict, Iterable, List, Mapping
 
 
+# Relações canônicas do Knowledge Graph (deve corresponder a
+# KnowledgeGraphGenerator.VALID_RELATIONS em models/SG/generation.py).
+KG_RELATIONS: List[str] = [
+    "is_a",
+    "part_of",
+    "made_of",
+    "used_for",
+    "has_property",
+]
+
+
 def _iter_sg_triplets(scene_g: Mapping[str, Any]) -> Iterable[tuple[str, str, str]]:
     """
     Extrai tripletas (sub, rel, obj) do Scene Graph, aceitando:
@@ -178,6 +189,87 @@ def evaluate_compare_graphs(scene_g: Mapping[str, Any], kg_g: Mapping[str, Any])
         "num_nodes": float(num_nodes),
         "num_edges": float(num_edges),
     }
+
+
+def compute_relation_breakdown(
+    scene_g: Mapping[str, Any],
+    kg_g: Mapping[str, Any],
+) -> Dict[str, float]:
+    """
+    Quantifica a riqueza multi-relacional do KG em relação aos nós do SG.
+
+    Métricas retornadas
+    -------------------
+    mean_facts_per_node:
+        Total de fatos do KG (em `factual_edges`) dividido pelo número de
+        nós únicos do SG. Mede enriquecimento médio por entidade.
+    relation_diversity:
+        Média, por nó do SG, da fração de tipos de relação (de `KG_RELATIONS`)
+        presentes para aquele nó. Valor em [0, 1] — 1.0 significa que cada nó
+        recebeu fatos de todos os tipos de relação.
+    mean_<relation>_count:
+        Contagem média de fatos por nó para cada relação em `KG_RELATIONS`.
+        Ex.: `mean_is_a_count`, `mean_part_of_count`, etc.
+
+    Notes
+    -----
+    Fatos do KG cuja `sub` não aparece nos nós do SG são ignorados
+    (fatos órfãos não contribuem para o enriquecimento dos nós detectados).
+    """
+    scene_labels = {
+        str(n.get("label", "")).lower().strip()
+        for n in scene_g.get("nodes", [])
+    }
+    scene_labels.discard("")
+
+    # Inicializa saida com todos os campos (mesmo que vazio)
+    result: Dict[str, float] = {
+        "mean_facts_per_node": 0.0,
+        "relation_diversity": 0.0,
+    }
+    for rel in KG_RELATIONS:
+        result[f"mean_{rel}_count"] = 0.0
+
+    if not scene_labels:
+        return result
+
+    # facts_per_label[label][rel] = contagem
+    facts_per_label: Dict[str, Dict[str, int]] = {
+        label: {rel: 0 for rel in KG_RELATIONS} for label in scene_labels
+    }
+    total_facts_per_label: Dict[str, int] = {label: 0 for label in scene_labels}
+
+    for edge in kg_g.get("factual_edges", []) or []:
+        if not isinstance(edge, Mapping):
+            continue
+        sub = str(edge.get("sub", "")).lower().strip()
+        rel = str(edge.get("rel", "")).lower().strip()
+        if sub not in facts_per_label:
+            continue
+        if rel not in facts_per_label[sub]:
+            continue  # relação fora da lista canônica
+        facts_per_label[sub][rel] += 1
+        total_facts_per_label[sub] += 1
+
+    n_labels = len(scene_labels)
+    n_rel_types = len(KG_RELATIONS)
+
+    # mean_facts_per_node
+    result["mean_facts_per_node"] = sum(total_facts_per_label.values()) / n_labels
+
+    # relation_diversity: média da fração de tipos presentes por nó
+    diversity_sum = 0.0
+    for facts in facts_per_label.values():
+        n_types_present = sum(1 for c in facts.values() if c > 0)
+        diversity_sum += n_types_present / n_rel_types
+    result["relation_diversity"] = diversity_sum / n_labels
+
+    # mean_<rel>_count por tipo
+    for rel in KG_RELATIONS:
+        total = sum(facts[rel] for facts in facts_per_label.values())
+        result[f"mean_{rel}_count"] = total / n_labels
+
+    return {k: float(v) for k, v in result.items()}
 
 
 def salvar_recall_results(

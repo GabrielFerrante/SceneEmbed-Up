@@ -3,7 +3,12 @@
     "allow": [
       "Bash(python train_with_h5.py)",
       "Bash(python eval_with_h5.py)",
-      "Bash(python eval_with_images.py)"
+      "Bash(python eval_with_images.py)",
+      "Bash(python data/extract_candidates.py)",
+      "Bash(where python:*)",
+      "Bash(conda info:*)",
+      "Bash(pip --version)",
+      "Bash(C:/Anaconda/envs/sg/python.exe -c \"import torch; print\\(torch.__version__, torch.cuda.is_available\\(\\)\\)\")"
     ]
   }
 }

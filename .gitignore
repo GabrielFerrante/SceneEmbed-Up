@@ -6,4 +6,5 @@ __pycache__
 .cursor
 *.mdc
 *.pth
+*.pt
 CLAUDE.local.md

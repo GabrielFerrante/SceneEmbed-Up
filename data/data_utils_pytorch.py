@@ -44,14 +44,15 @@ class CoyoCollate:
             # Caso extremo: todo o batch estava corrompido
             return None
         
-        # Separa imagens e textos
+        # Separa imagens, textos e caminhos
         images = [item[0] for item in batch]
         captions = [item[1] for item in batch]
-        
+        paths = [item[2] if len(item) > 2 else "" for item in batch]
+
         # 2. Processa Imagens
         # Empilha a lista de tensores em um único tensor [B, C, H, W]
         images_tensor = torch.stack(images, dim=0)
-        
+
         # 3. Processa Textos (Tokenização)
         if self.tokenizer:
             # Tokeniza o batch inteiro de uma vez (mais eficiente)
@@ -62,10 +63,10 @@ class CoyoCollate:
                 max_length=self.max_length,
                 return_tensors="pt"    # Retorna tensores PyTorch
             )
-            return images_tensor, text_tokens
+            return images_tensor, text_tokens, paths
         else:
             # Se não tiver tokenizer, retorna as strings cruas
-            return images_tensor, captions
+            return images_tensor, captions, paths
 
 class CoyoExtractedDataset(Dataset):
     def __init__(self, root_dir, transform=None, extensions=('.jpg', '.jpeg', '.png')):
@@ -124,8 +125,7 @@ class CoyoExtractedDataset(Dataset):
             except Exception as e:
                 print(f"Erro ao ler texto {txt_path}: {e}")
         
-        # Retorna o par
-        return image, caption
+        return image, caption, img_path
     
 class ShardedH5Dataset_withSSD(torch.utils.data.Dataset):
     """
@@ -338,7 +338,7 @@ def create_all_dataloaders( #USAR SE TIVER MEMÓRIA VRAM O SUFICIENTE
     collate_fn = CoyoCollate(tokenizer=None, max_length=77)
     
    # 1. Definir os tamanhos das fatias desejadas
-    train_size = int(500000)
+    train_size = int(480000)
     val_size   = int(10000)
     test_size  = int(10000)
     

@@ -13,8 +13,8 @@ Referencia:
   Tang et al., "Unbiased Scene Graph Generation", CVPR 2020
 
 Uso:
-    python eval_sg_vg.py --vg-dir F:/VG --checkpoint checkpoints/best_aligner.pth
-    python eval_sg_vg.py --vg-dir F:/VG --checkpoint checkpoints/best_aligner.pth --max-samples 50
+    python eval_sg_vg.py --vg-dir G:/vg --checkpoint checkpoints/best_aligner.pth
+    python eval_sg_vg.py --vg-dir G:/vg --checkpoint checkpoints/best_aligner.pth --max-samples 50
 """
 
 from __future__ import annotations
@@ -22,73 +22,24 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from collections import Counter, defaultdict
+from collections import defaultdict
 from datetime import datetime
-from typing import Any, Dict, List
 
 import torch
 from PIL import Image
 from tqdm import tqdm
 
 from data.data_utils_pytorch import get_transforms
+from data.vg_dataset import (
+    build_vg150_vocab,
+    get_image_path,
+    load_scene_graphs,
+)
 from models.aligners.lora_cross_attention import LoRACrossAttentionAligner
 from models.encoders.dinov3_extrator import DinoSceneEncoder
 from models.encoders.qwen3_extrator import QwenSceneEmbedder
+from models.SG.classifier_head import SGClassifierHead
 from models.SG.generation import SceneGraphGenerator
-
-
-# ── VG-150 Vocabulary ───────────────────────────────────────────────────
-
-
-def load_scene_graphs(vg_dir: str) -> list[dict]:
-    """Carrega scene_graphs.json do Visual Genome."""
-    path = os.path.join(vg_dir, "scene_graphs.json")
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            f"scene_graphs.json nao encontrado em {vg_dir}. "
-            "Rode: python data/download_visual_genome.py --data-dir <vg_dir>"
-        )
-    print(f"Carregando scene_graphs.json ({os.path.getsize(path) / 1e9:.1f} GB)...")
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def build_vg150_vocab(
-    scene_graphs: list[dict],
-    n_objects: int = 150,
-    n_predicates: int = 50,
-) -> tuple[list[str], list[str], set[str], set[str]]:
-    """
-    Constroi vocabulario VG-150: top-150 objetos, top-50 predicados.
-
-    Returns
-    -------
-    obj_list, pred_list:
-        Listas ordenadas por frequencia (usadas como candidatos do modelo).
-    obj_set, pred_set:
-        Sets para lookup rapido na filtragem de GT.
-    """
-    obj_counter: Counter[str] = Counter()
-    pred_counter: Counter[str] = Counter()
-
-    for sg in tqdm(scene_graphs, desc="Construindo vocabulario VG-150"):
-        for obj in sg.get("objects", []):
-            names = obj.get("names") or [obj.get("name", "")]
-            name = names[0].lower().strip() if names else ""
-            if name:
-                obj_counter[name] += 1
-        for rel in sg.get("relationships", []):
-            pred = rel.get("predicate", "").lower().strip()
-            if pred:
-                pred_counter[pred] += 1
-
-    obj_list = [n for n, _ in obj_counter.most_common(n_objects)]
-    pred_list = [p for p, _ in pred_counter.most_common(n_predicates)]
-
-    print(f"  Objetos: {len(obj_counter)} unicos -> top {n_objects}")
-    print(f"  Predicados: {len(pred_counter)} unicos -> top {n_predicates}")
-
-    return obj_list, pred_list, set(obj_list), set(pred_list)
 
 
 # ── GT Extraction ───────────────────────────────────────────────────────
@@ -211,18 +162,6 @@ def per_predicate_recall(
     return results
 
 
-# ── Image path resolution ──────────────────────────────────────────────
-
-
-def get_image_path(vg_dir: str, image_id: int) -> str | None:
-    """Procura imagem em VG_100K ou VG_100K_2."""
-    for subdir in ["VG_100K", "VG_100K_2"]:
-        path = os.path.join(vg_dir, subdir, f"{image_id}.jpg")
-        if os.path.exists(path):
-            return path
-    return None
-
-
 # ── Main ────────────────────────────────────────────────────────────────
 
 
@@ -235,6 +174,10 @@ def main() -> None:
     parser.add_argument("--edge-threshold", type=float, default=0.0, help="Threshold de arestas (0.0 = manter todas para ranking)")
     parser.add_argument("--seed", type=int, default=42, help="Seed para split train/test")
     parser.add_argument("--test-ratio", type=float, default=0.2, help="Fracao de teste")
+    parser.add_argument("--sg-head-checkpoint", type=str, default=None,
+                        help="Caminho para checkpoint da SGClassifierHead. Se fornecido, substitui o scoring por retrieval no passo de deteccao de nos.")
+    parser.add_argument("--min-patches", type=int, default=2,
+                        help="Tamanho minimo (em patches 32x32) para um componente virar um no")
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -292,12 +235,27 @@ def main() -> None:
     dino = DinoSceneEncoder(device=device)
     qwen = QwenSceneEmbedder(device=device)
 
+    sg_head = None
+    if args.sg_head_checkpoint:
+        if not os.path.exists(args.sg_head_checkpoint):
+            raise FileNotFoundError(f"SG head checkpoint nao encontrado: {args.sg_head_checkpoint}")
+        sg_head = SGClassifierHead(
+            visual_dim=768,
+            vocab_size=len(obj_list),
+        )
+        state = torch.load(args.sg_head_checkpoint, map_location=device)
+        sg_head.load_state_dict(state, strict=True)
+        sg_head.to(device).to(torch.bfloat16).eval()
+        print(f"  SG head carregado: {args.sg_head_checkpoint}")
+
     generator = SceneGraphGenerator(
         dino_encoder=dino,
         qwen_embedder=qwen,
         aligner=aligner,
         threshold=args.node_threshold,
         edge_threshold=args.edge_threshold,
+        sg_classifier_head=sg_head,
+        min_patches=args.min_patches,
     )
 
     torch.cuda.empty_cache()
@@ -398,7 +356,8 @@ def main() -> None:
     # ── 7. Salvar resultados ────────────────────────────────────────────
     results_dir = "results"
     os.makedirs(results_dir, exist_ok=True)
-    output_path = os.path.join(results_dir, "sggen_vg150_results.json")
+    timestamp_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_path = os.path.join(results_dir, f"sggen_vg150_results_{timestamp_tag}.json")
 
     output = {
         "metadata": {
@@ -408,6 +367,7 @@ def main() -> None:
             "node_threshold": args.node_threshold,
             "edge_threshold": args.edge_threshold,
             "checkpoint": args.checkpoint,
+            "sg_head_checkpoint": args.sg_head_checkpoint,
             "vocab_objects": len(obj_list),
             "vocab_predicates": len(pred_list),
             "avg_gt_triples": n_gt_triples_total / len(test_samples),

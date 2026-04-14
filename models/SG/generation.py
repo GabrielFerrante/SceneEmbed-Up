@@ -5,8 +5,17 @@ import json
 import os
 from datetime import datetime
 
+
+def _label_connected_components(mask: torch.Tensor) -> torch.Tensor:
+    # mask: [H, W] bool -> [H, W] int (0 = background); 4-connectivity
+    from scipy.ndimage import label
+    arr = mask.detach().cpu().numpy().astype("uint8")
+    labels, _ = label(arr)
+    return torch.from_numpy(labels).to(mask.device)
+
+
 class SceneGraphGenerator:
-    def __init__(self, dino_encoder, qwen_embedder, aligner, threshold=0.3, edge_threshold=0.95):
+    def __init__(self, dino_encoder, qwen_embedder, aligner, threshold=0.3, edge_threshold=0.95, sg_classifier_head=None, min_patches: int = 2):
         self.encoder = dino_encoder
         self.embedder = qwen_embedder
         self.aligner = aligner
@@ -14,6 +23,8 @@ class SceneGraphGenerator:
         self.edge_threshold = edge_threshold
         self.device = next(aligner.parameters()).device
         self.dtype = qwen_embedder.dtype
+        self.sg_classifier_head = sg_classifier_head
+        self.min_patches = min_patches
         
     def _compute_directional_context(self, query_node, context_node):
         """
@@ -68,22 +79,55 @@ class SceneGraphGenerator:
 
         # 3. Criação de Nós (filtrados por score)
         kept_original_ids = []
-        for i, label in enumerate(candidate_nodes):
-            v_aligned = node_embeddings_refined[0, i]
-            t_original = node_queries[0, i]
-            
-            score = calculate_retrieval_score(v_aligned, t_original)
-            
-            if score > self.threshold:
-                kept_original_ids.append(i)
-                scene_graph["nodes"].append({
-                    # `id` contíguo (índice no array final de nós)
-                    "id": len(scene_graph["nodes"]),
-                    "label": label,
-                    "embedding": v_aligned,
-                    "attn_weights": node_attn_weights[0, i], # Guardando os pesos para análise
-                    "score": score.item()
-                })
+        if self.sg_classifier_head is not None:
+            # MIL patch-level: patch_logits [1, 1024, vocab_size]
+            patch_logits = self.sg_classifier_head(visual_input)
+            probs = torch.sigmoid(patch_logits)[0]                     # [1024, vocab_size]
+            H = W = 32                                                  # grid consistente com o pooling
+            probs_grid = probs.reshape(H, W, -1)                        # [32, 32, vocab_size]
+            visual_grid = visual_input[0].reshape(H, W, -1)             # [32, 32, 768]
+
+            for class_idx, label in enumerate(candidate_nodes):
+                if class_idx >= probs_grid.shape[-1]:
+                    break  # robustez: candidate_nodes pode exceder vocab_size
+                mask = probs_grid[:, :, class_idx] > self.threshold     # [32, 32] bool
+                if not mask.any():
+                    continue
+                components = _label_connected_components(mask)          # [32, 32] int
+                n_comps = int(components.max().item())
+                for comp_id in range(1, n_comps + 1):
+                    comp_mask = (components == comp_id)
+                    if int(comp_mask.sum().item()) < self.min_patches:
+                        continue
+                    # Instance feature: mean-pool dos patches no componente
+                    inst_feat_768 = visual_grid[comp_mask].mean(dim=0)             # [768]
+                    # Projeta p/ espaco textual via visual_proj do aligner (congelado no eval)
+                    inst_emb_4096 = self.aligner.visual_proj(inst_feat_768)        # [4096]
+                    inst_score = probs_grid[:, :, class_idx][comp_mask].mean().item()
+                    scene_graph["nodes"].append({
+                        "id": len(scene_graph["nodes"]),
+                        "label": label,
+                        "embedding": inst_emb_4096,
+                        "score": float(inst_score),
+                        "patch_mask": comp_mask.detach().cpu(),
+                    })
+        else:
+            for i, label in enumerate(candidate_nodes):
+                v_aligned = node_embeddings_refined[0, i]
+                t_original = node_queries[0, i]
+
+                score = calculate_retrieval_score(v_aligned, t_original)
+
+                if score > self.threshold:
+                    kept_original_ids.append(i)
+                    scene_graph["nodes"].append({
+                        # `id` contíguo (índice no array final de nós)
+                        "id": len(scene_graph["nodes"]),
+                        "label": label,
+                        "embedding": v_aligned,
+                        "attn_weights": node_attn_weights[0, i], # Guardando os pesos para análise
+                        "score": score.item()
+                    })
 
         # 4. Inferência de Relações Direcionais
         rel_queries = self.embedder.embed_components([candidate_relations], normalize=False)
@@ -121,8 +165,8 @@ class KnowledgeGraphGenerator:
     Gera Knowledge Graph a partir de um Scene Graph.
 
     Suporta dois modos:
-    - **Cache** (taxonomy_cache): lookup instantâneo de taxonomias pré-geradas
-      por data/extract_candidates.py. Não requer modelo causal.
+    - **Cache** (taxonomy_cache): lookup instantâneo em dict pré-gerado
+      (ver data/extract_candidates.py). Não requer modelo causal.
     - **LLM** (qwen_model + qwen_tokenizer): geração online via modelo causal.
 
     Relacoes suportadas (VALID_RELATIONS):

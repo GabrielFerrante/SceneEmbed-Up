@@ -46,7 +46,7 @@ Combina DINOv3 (encoder visual com upsampling HR) + Qwen3-Embedding-8B (encoder 
 - COYO-700M (~15M imagens)
 - Shards H5: visual_feats [N,1024,768], text_feats [N,1,4096], visual_global [N,768]
 - 7GB por shard de 5k amostras (gzip)
-- VisualGenome 
+- VisualGenome para geração de grafos
 ## Delegacao para Subagentes
 - **Ao modificar qualquer arquivo em `models/`** (incluindo `models/encoders/`, `models/aligners/`, `models/ups/`, `models/SG/`, `models/detectors/`), delegar a tarefa para o subagente `cv-multimodal-expert` via Agent tool. Esse agente conhece o stack DINOv3 + Qwen3 + LoRA, scene graphs, knowledge graphs e metodos de upsampling, e deve liderar decisoes de arquitetura e revisao de codigo nessa area.
 - Excecoes em que **nao** delegar: edicoes triviais (renomear variavel, ajustar import, corrigir typo) — resolver direto.

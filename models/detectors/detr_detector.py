@@ -5,7 +5,7 @@ Wrapper de inferencia sobre ``facebook/detr-resnet-50`` fine-tuned para VG-150.
 
 Carrega o DETR-R50 com head re-treinada para 150 classes de objetos
 (+ slot "no object" gerenciado internamente pelo DETR).
-Imagens entram em 256x256 (mesma resolucao do pipeline DINO/COYO).
+Imagens entram em 640x640.
 
 Uso tipico:
     detector = DetrDetector(

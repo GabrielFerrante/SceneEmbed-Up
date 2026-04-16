@@ -4,7 +4,7 @@ vg_detection_dataset.py
 Dataset Visual Genome VG-150 para fine-tune de detectores (DETR-R50).
 
 Formato de saida compativel com `transformers.DetrForObjectDetection`:
-  image  : [3, 256, 256] float32 (normalizado pelo transform ImageNet)
+  image  : [3, 640, 640] float32 (normalizado pelo transform ImageNet)
   target : dict com:
     - "class_labels" : [K] long, indices em obj_list (0..149)
     - "boxes"        : [K, 4] float32, formato (cx, cy, w, h) normalizado [0, 1]
@@ -54,7 +54,7 @@ class VisualGenomeDetectionDataset(Dataset):
     Dataset VG-150 para fine-tune de detector (formato DETR).
 
     Cada amostra:
-      image  : [3, 256, 256] float32 (ImageNet-normalized)
+      image  : [3, 640, 640] float32 (ImageNet-normalized)
       target : {"class_labels": [K] long, "boxes": [K, 4] float32 (cxcywh norm)}
     """
 
@@ -135,7 +135,7 @@ class VisualGenomeDetectionDataset(Dataset):
 
 def detection_collate(batch):
     """
-    Collate para DETR: imagens em tensor [B, 3, 256, 256], targets como list[dict].
+    Collate para DETR: imagens em tensor [B, 3, 640, 640], targets como list[dict].
     DetrForObjectDetection recebe `labels=List[Dict]`, uma entrada por imagem.
     """
     images = torch.stack([b[0] for b in batch])

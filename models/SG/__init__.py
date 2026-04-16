@@ -1,4 +1,13 @@
-from models.SG.generation import SceneGraphGenerator, KnowledgeGraphGenerator
-from models.SG.classifier_head import SGClassifierHead
+from models.SG.knowledge import KnowledgeGraphGenerator
+from models.SG.relation_head import RelationHead
+from models.SG.relation_predictor import RelationPredictor
+from models.SG.attribute_head import AttributeHead
+from models.SG.attribute_classifier import AttributeClassifier
 
-__all__ = ["SceneGraphGenerator", "KnowledgeGraphGenerator", "SGClassifierHead"]
+__all__ = [
+    "KnowledgeGraphGenerator",
+    "RelationHead",
+    "RelationPredictor",
+    "AttributeHead",
+    "AttributeClassifier",
+]

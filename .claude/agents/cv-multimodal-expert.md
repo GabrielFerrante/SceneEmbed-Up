@@ -30,6 +30,10 @@ engenharia (VRAM, throughput, reprodutibilidade).
 - Sinkhorn-Knopp, optimal transport para matching
 - Metricas: Recall@K bidirecional, mean rank, zero-shot transfer
 
+## Detecção de objetos para SGG
+- Uso de arquiteturas com fine-tuning, no caso DETR com visual genome
+- TransferLearning
+
 ### Graph Neural Networks
 - GCN, GAT, GraphSAGE, GIN, R-GCN para grafos heterogeneos
 - Message passing customizado em scene graphs

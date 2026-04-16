@@ -4,9 +4,9 @@
 
 Pipeline de pesquisa que combina **DINOv3** (encoder visual com upsampling HR) + **Qwen3-Embedding-8B** (encoder textual) + **LoRA Cross-Attention Aligner** para aprender um espaço de embeddings compartilhado e gerar Scene Graphs semânticos enriquecidos com Knowledge Graphs.
 
-- Retrieval-based open-vocabulary scene graph generation via lightweight cross-attention alignment between frozen vision and language foundation models, with LLM-driven knowledge graph expansion.
+- **Scene Graph Generation** on Visual Genome (VG-150) via 3 independent stages: DETR-R50 detector (fine-tuned), supervised `AttributeHead` and directional `RelationHead` — all operating over frozen high-resolution DINOv3 features projected to Qwen3 text space via `aligner.visual_proj`.
 
-- Post-hoc contrastive alignment via LoRA cross-attention bridge between frozen high-resolution vision (DINOv3 + AnyUp) and language (Qwen3-8B) foundation models.
+- **Contrastive Alignment** via LoRA cross-attention bridge between frozen high-resolution vision (DINOv3 + AnyUp) and language (Qwen3-8B) foundation models, with LLM-driven knowledge graph expansion.
 ---
 
 ## Visão Geral da Arquitetura
@@ -23,22 +23,53 @@ Imagem
               │
               │  reshape + transpose (flatten)
               ▼
-          [B, 1024, 768]
-              │
+          [B, 1024, 768]  ──────────────────┐
+              │                              │
+              ▼                              ▼
+  LoRACrossAttentionAligner         SGClassifierHead (VG-150)
+    visual_proj (frozen) + LoRA       LayerNorm + MLP
+    CrossAttention: Q=text, K=V=vis   patch_logits [B, 1024, 150]
+              │                              │
+              │ (usado apenas em retrieval   │  sigmoid + threshold
+              │  — Recall@K com shards H5)   │  + connected components (4-conn)
+              │                              │  + MIL mean-pool por componente
+              │                              ▼
+              │                      Instâncias de objetos
+              │                      (mask 32×32, feat [768])
+              │                              │
+              │   aligner.visual_proj (frozen) [768 → 4096]
+              │                              │
+              │                              ▼
+              │                       node_embs [N_obj, 4096]
+              │                              │
+              │                              ▼
+              │                     RelationHead (VG-50)
+              │                     sub / obj / (s−o) / ctx
+              │                     MLP → pred_logits
+              │                              │
+              │                              ▼
+              │                      Arestas direcionadas
+              │                      (sub, pred, obj, conf)
+              │                              │
+              │                              ▼
+              │                     ┌────────────────────┐
+              │                     │ SceneGraphGenerator │
+              │                     │   nodes + edges    │
+              │                     └─────────┬──────────┘
+              │                               ▼
+              │                       Knowledge Graph
+              │                       (tripletas is_a via Qwen3 LLM)
               ▼
-  LoRACrossAttentionAligner
-    visual_proj (frozen) + LoRA (rank=64)
-    CrossAttention: Q=text, K=V=visual
-              │
-              ▼
-      attn_output [B, N_queries, 4096]
-              │
-    ┌─────────┴──────────┐
-    ▼                    ▼
-Scene Graph         Knowledge Graph
-(Nós + Arestas      (Tripletas is_a
- direcionais)        via Qwen3 LLM)
+   attn_output [B, N_q, 4096]
+   (retrieval — eval_retrieval_*)
 ```
+
+**Fluxo de treino em dois estágios:**
+
+1. **Aligner** — treinado em COYO-700M via shards H5 com InfoNCE simétrico + `entropy_reg` ([train_aligner_with_h5.py](train_aligner_with_h5.py)).
+2. **Heads VG-150** — com Aligner e DINO congelados:
+   - [train_sg_head.py](train_sg_head.py): `SGClassifierHead` sobre `[B, 1024, 768]` do DINO, multi-label BCE com `pos_weight`.
+   - [train_relation_head.py](train_relation_head.py): `RelationHead` sobre pares GT projetados via `aligner.visual_proj` (setup PredCls-like, bboxes GT), CE com `class_weight`.
 
 ![alt text](image.png)
 ![alt text](image-1.png)
@@ -53,10 +84,12 @@ Scene Graph         Knowledge Graph
 - **Encoder visual de alta resolução:** DINOv3 ViT-B/16 com upsampling por [AnyUp](https://github.com/wimmerth/anyup) ou FeatUp (JBU Stack), preservando detalhes espaciais finos.
 - **Encoder textual de alta capacidade:** Qwen3-Embedding-8B com mean pooling e instrução de tarefa contextual.
 - **Aligner com LoRA:** Projeção visual congelada + adaptadores LoRA treináveis (rank=64, ~200K params), cross-attention assimétrico texto→visual.
-- **Scene Graph generativo:** Detecção de objetos por thresholding de similaridade + inferência de relações direcionais via cross-attention entre nós.
+- **SGClassifierHead (VG-150):** MLP leve sobre a grade HR 32×32 do DINO (`[B, 1024, 768]`) para classificação multi-label de objetos em VG-150, com agregação MIL/connected-components.
+- **RelationHead (VG-50):** Classificador de predicados direcional sobre pares `(sub, obj)` já projetados no espaço Qwen (4096-d) via `aligner.visual_proj`, com feature de diferença e contexto cross-attention opcional. Setup PredCls-like (bboxes GT no treino).
+- **Scene Graph generativo:** Detecção de objetos por thresholding de similaridade + inferência de relações direcionais via cross-attention entre nós; integrável com `SGClassifierHead`/`RelationHead`.
 - **Knowledge Graph expansivo:** Extração de fatos taxonômicos (`is_a`) via prompting estruturado do Qwen3.
-- **Pipeline de dados COYO-700M:** Suporte a ~15M imagens com dataloaders eficientes via shards HDF5 com buffer rotativo em RAM.
-- **Métricas completas:** Recall@K bidirecional (I2T + T2I), semantic coverage, entity recall, expansion ratio, mean hypernym count.
+- **Pipeline de dados COYO-700M + Visual Genome:** Shards HDF5 em buffer rotativo para retrieval (COYO) e loaders multi-label/pares GT para Scene Graph Generation (VG-150).
+- **Métricas completas:** Recall@K bidirecional (I2T + T2I), SGGen R@20/50/100 e mean Recall@K (mR@K) no padrão da literatura de SGG, semantic coverage, entity recall, expansion ratio, mean hypernym count.
 
 ---
 
@@ -73,26 +106,37 @@ SceneEmbed-Up/
 │   ├── ups/
 │   │   └── hr_conversions.py        # AnyUpModel, JBUStack, LoftUpModel
 │   └── SG/
-│       └── generation.py            # SceneGraphGenerator, KnowledgeGraphGenerator
+│       ├── generation.py            # SceneGraphGenerator, KnowledgeGraphGenerator
+│       ├── classifier_head.py       # SGClassifierHead (VG-150), RelationHead (VG-50)
+│       └── projection.py            # Helpers de projeção/score (reexports)
 ├── data/
-│   ├── data_utils_pytorch.py        # Datasets e DataLoaders
+│   ├── data_utils_pytorch.py        # Datasets e DataLoaders (COYO/shards H5)
+│   ├── vg_dataset.py                # Visual Genome: multi-label + pares GT + VG-150 vocab
+│   ├── download_visual_genome.py    # Download de imagens/anotações do VG
 │   ├── extract_files_coyo.py        # Extração dos .tar do img2dataset
-│   └── get_metadados_coyo.py        # Download de metadados COYO
+│   ├── extract_candidates.py        # Extração de candidatos textuais
+│   ├── clearning_texts.py           # Limpeza de legendas COYO
+│   ├── get_metadados_coyo.py        # Download de metadados COYO
+│   ├── get_small_sample_coyo.py     # Amostra reduzida para debug
+│   ├── shards_in_memory_calc.py     # Dimensionamento de buffer em RAM
+│   └── analysisCOYO/                # Análises exploratórias de COYO
 ├── embeddings/
-│   ├── generate_shards.py           # Exportação de embeddings em shards H5
-│   ├── consolidate_shards.py        # Consolidação com shuffle
-│   └── fix_shard_shapes.py          # Correção de shapes
+│   └── generate_shards.py           # Exportação de embeddings em shards H5
 ├── utils/
 │   ├── early_stopping.py            # EarlyStopping
 │   ├── logging_utils.py             # TensorBoard writer
 │   ├── checkpoint.py                # Salvar checkpoints por época
 │   ├── graph_io.py                  # Persistência de grafos em JSON
 │   ├── graph_viz.py                 # Visualização com networkx
+│   ├── io_utils.py                  # Helpers de I/O
 │   └── metrics_scene_graph.py       # Métricas de avaliação
-├── train_with_h5.py                 # Treino rápido com embeddings pré-computados
-├── train_with_Images.py             # Treino fim-a-fim com imagens
-├── eval_with_h5.py                  # Avaliação com Recall@K bidirecional
-├── eval_with_images.py              # Avaliação com geração de SG/KG
+├── train_aligner_with_h5.py         # Treino do Aligner com embeddings pré-computados
+├── train_aligner_with_Images.py     # Treino fim-a-fim do Aligner com imagens
+├── train_sg_head.py                 # Treino da SGClassifierHead sobre VG-150 (DINO congelado)
+├── train_relation_head.py           # Treino da RelationHead sobre pares GT de VG-150
+├── eval_retrieval_with_h5.py        # Recall@K bidirecional com shards H5
+├── eval_retrieval_with_images.py    # Recall@K bidirecional com imagens
+├── eval_sg_vg.py                    # SGGen Recall@K (R@K, mR@K) no Visual Genome
 ├── memory.mdc                       # Contexto rápido para agentes/LLMs
 └── Docs/
     └── ARCHITECTURE.md              # Documentação detalhada da arquitetura
@@ -146,32 +190,46 @@ python data/extract_files_coyo.py
 ```bash
 # Gera shards H5 diretamente (recomendado)
 python embeddings/generate_shards.py
-
-# Consolidar com shuffle para treino
-python embeddings/consolidate_shards.py
 ```
 
-### 3. Treinar o Aligner
+### 3. Treinar o Aligner (retrieval)
 
 ```bash
 # Modo rápido (usa embeddings pré-computados) — recomendado
-python train_with_h5.py
+python train_aligner_with_h5.py
 
 # Modo fim-a-fim (requer +24 GB VRAM)
-python train_with_Images.py
+python train_aligner_with_Images.py
 ```
 
-### 4. Avaliar
+### 4. Avaliar retrieval
 
 ```bash
-# Recall@K bidirecional + métricas de SG/KG
-python eval_with_h5.py
+# Recall@K bidirecional com shards H5
+python eval_retrieval_with_h5.py
 
-# Apenas com imagens reais
-python eval_with_images.py
+# Recall@K bidirecional com imagens reais
+python eval_retrieval_with_images.py
 ```
 
-### 5. Visualizar grafos gerados
+### 5. Scene Graph Generation (Visual Genome VG-150)
+
+```bash
+# Baixar Visual Genome (imagens + scene_graphs.json)
+python data/download_visual_genome.py --data-dir G:/vg
+
+# Treinar a SGClassifierHead (objetos VG-150) sobre DINO congelado
+python train_sg_head.py --vg-dir G:/vg --epochs 20 --batch-size 32
+
+# Treinar a RelationHead (predicados VG-50) sobre pares GT
+# Aligner e DINO ficam congelados (setup PredCls-like)
+python train_relation_head.py --vg-dir G:/vg --aligner checkpoints/best_aligner.pth
+
+# Benchmark SGGen Recall@K / mean Recall@K
+python eval_sg_vg.py --vg-dir G:/vg --checkpoint checkpoints/best_aligner.pth
+```
+
+### 6. Visualizar grafos gerados
 
 ```bash
 python viz/graphs_viz.py
@@ -218,7 +276,14 @@ loss = contrastive_loss + 0.05 × entropy_reg
 | `T2I_Recall@K`      | Top-K textos → encontra a imagem correta          |
 | `Mean_Recall@K`     | Média bidirecional (padrão CLIP/BLIP)             |
 
-### Scene/Knowledge Graphs
+### Scene Graph Generation (VG-150)
+
+| Métrica        | Descrição                                                         |
+|----------------|-------------------------------------------------------------------|
+| `R@20/50/100`  | Recall@K sobre tripletas `(sub, pred, obj)` (Xu et al. 2017)     |
+| `mR@20/50/100` | Mean Recall@K — média por classe de predicado (Tang et al. 2020) |
+
+### Knowledge Graph / Semântica
 
 | Métrica                | Descrição                                         |
 |------------------------|---------------------------------------------------|
@@ -235,16 +300,20 @@ loss = contrastive_loss + 0.05 × entropy_reg
 
 ```
 logs/
-  └── YYYYMMDD-HHMMSS/   ← TensorBoard (loss, acc, entropy por step e época)
+  ├── YYYYMMDD-HHMMSS/   ← TensorBoard do Aligner (loss, acc, entropy)
+  └── sg_head/           ← TensorBoard das heads de SG/Relation
 
 checkpoints/
-  ├── best_aligner.pth   ← Melhor modelo (EarlyStopping)
-  └── aligner_epoch_N.pth
+  ├── best_aligner.pth   ← Melhor Aligner (EarlyStopping)
+  ├── aligner_epoch_N.pth
+  ├── best_sg_head.pth   ← Melhor SGClassifierHead
+  └── best_relation_head.pth
 
 results/
   ├── resultado_batch0_img0.json
   ├── resultado_batch0_img0.png  ← grafo visualizado
-  └── recall_metrics.json
+  ├── recall_metrics.json
+  └── sgg_vg_metrics.json        ← R@K / mR@K do eval_sg_vg.py
 ```
 
 Visualizar logs:
@@ -268,7 +337,11 @@ tensorboard --logdir logs/
 - [AnyUp](https://github.com/wimmerth/anyup) — Wimmer et al.
 - [FeatUp](https://github.com/mhamilton723/FeatUp) — Hamilton et al.
 - [COYO-700M](https://github.com/kakaobrain/coyo-dataset) — Kakao Brain
+- [Visual Genome](https://homes.cs.washington.edu/~ranjay/visualgenome/) — Krishna et al.
 - [img2dataset](https://github.com/rom1504/img2dataset) — Beaumont
+- Xu et al., *Scene Graph Generation by Iterative Message Passing*, CVPR 2017
+- Zellers et al., *Neural Motifs*, CVPR 2018
+- Tang et al., *Unbiased Scene Graph Generation from Biased Training*, CVPR 2020
 
 ---
 

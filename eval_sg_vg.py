@@ -3,6 +3,11 @@ eval_sg_vg.py
 --------------
 SGGen Recall@K benchmark no Visual Genome (VG-150).
 
+Pipeline de 3 stages independentes:
+  Stage 1: DetrDetector    — deteccao de objetos via DETR-R50 fine-tuned
+  Stage 2: AttributeClassifier — classificacao de atributos (opcional)
+  Stage 3: RelationPredictor   — predicao de relacoes entre pares
+
 Metricas padrao da literatura de Scene Graph Generation:
   - Recall@K (R@20, R@50, R@100)
   - Mean Recall@K (mR@20, mR@50, mR@100)
@@ -13,8 +18,17 @@ Referencia:
   Tang et al., "Unbiased Scene Graph Generation", CVPR 2020
 
 Uso:
-    python eval_sg_vg.py --vg-dir G:/vg --checkpoint checkpoints/best_aligner.pth
-    python eval_sg_vg.py --vg-dir G:/vg --checkpoint checkpoints/best_aligner.pth --max-samples 50
+    python eval_sg_vg.py --vg-dir G:/vg \\
+        --aligner checkpoints/best_aligner.pth \\
+        --detr-checkpoint checkpoints/best_detr_vg150.pth \\
+        --rel-head-checkpoint checkpoints/best_relation_head.pth
+
+    # Com atributos (stage 2):
+    python eval_sg_vg.py --vg-dir G:/vg \\
+        --aligner checkpoints/best_aligner.pth \\
+        --detr-checkpoint checkpoints/best_detr_vg150.pth \\
+        --rel-head-checkpoint checkpoints/best_relation_head.pth \\
+        --attr-head-checkpoint checkpoints/best_attribute_head.pth
 """
 
 from __future__ import annotations
@@ -22,24 +36,65 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 from collections import defaultdict
 from datetime import datetime
 
 import torch
+import torch.nn.functional as F
 from PIL import Image
 from tqdm import tqdm
 
 from data.data_utils_pytorch import get_transforms
 from data.vg_dataset import (
+    build_attribute_vocab,
     build_vg150_vocab,
     get_image_path,
     load_scene_graphs,
 )
 from models.aligners.lora_cross_attention import LoRACrossAttentionAligner
+from models.detectors.detr_detector import DetrDetector
 from models.encoders.dinov3_extrator import DinoSceneEncoder
-from models.encoders.qwen3_extrator import QwenSceneEmbedder
-from models.SG.classifier_head import SGClassifierHead
-from models.SG.generation import SceneGraphGenerator
+from models.SG.attribute_classifier import AttributeClassifier
+from models.SG.attribute_head import AttributeHead
+from models.SG.relation_head import RelationHead
+from models.SG.relation_predictor import RelationPredictor
+
+
+# ── Visual Feature Extraction ─────────────────────────────────────────
+
+
+@torch.no_grad()
+def extract_visual_grid(
+    dino: DinoSceneEncoder,
+    image_tensor: torch.Tensor,
+    device: str,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """
+    Extrai grid de features visuais DINOv3 HR para uma imagem.
+
+    Pipeline: DINO extract -> HR feat -> pool 32x32 -> reshape [1, 32, 32, 768].
+
+    Parameters
+    ----------
+    dino : DinoSceneEncoder
+    image_tensor : [3, H, W] normalizado (output de get_transforms)
+    device : str
+    dtype : torch.dtype
+
+    Returns
+    -------
+    visual_grid : [1, 32, 32, 768]
+    """
+    images = image_tensor.unsqueeze(0).to(device)       # [1, 3, H, W]
+    _, hr_feat = dino.extract_features(images)
+    hr_feat_small = F.adaptive_avg_pool2d(hr_feat, (32, 32))  # [1, C, 32, 32]
+    B, C, H, W = hr_feat_small.shape
+    # [1, C, 32, 32] -> [1, 1024, 768] -> [1, 32, 32, 768]
+    visual_input = hr_feat_small.reshape(B, C, H * W).transpose(1, 2)
+    visual_grid = visual_input.reshape(1, 32, 32, C).to(dtype).contiguous()
+    return visual_grid
 
 
 # ── GT Extraction ───────────────────────────────────────────────────────
@@ -56,7 +111,6 @@ def extract_gt_triples(
     Tripletas cujos labels nao estao no vocabulario sao descartadas,
     mantendo consistencia com o que o modelo pode prever.
     """
-    # Mapeia object_id -> nome (apenas labels no vocabulario)
     id_to_name: dict[int, str] = {}
     for obj in sg.get("objects", []):
         names = obj.get("names") or [obj.get("name", "")]
@@ -147,7 +201,6 @@ def per_predicate_recall(
 
     Retorna dict predicado -> recall (None se predicado ausente no GT).
     """
-    # Agrupa GT por predicado
     gt_by_pred: dict[str, set[tuple[str, str, str]]] = defaultdict(set)
     for sub, pred, obj in gt_triples:
         gt_by_pred[pred].add((sub, pred, obj))
@@ -166,22 +219,56 @@ def per_predicate_recall(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="SGGen Recall@K — Visual Genome")
-    parser.add_argument("--vg-dir", type=str, required=True, help="Diretorio com dados do VG")
-    parser.add_argument("--checkpoint", type=str, default="checkpoints/best_aligner.pth")
-    parser.add_argument("--max-samples", type=int, default=1000, help="Limite de amostras de teste")
-    parser.add_argument("--node-threshold", type=float, default=0.01, help="Threshold baixo para manter candidatos")
-    parser.add_argument("--edge-threshold", type=float, default=0.0, help="Threshold de arestas (0.0 = manter todas para ranking)")
-    parser.add_argument("--seed", type=int, default=42, help="Seed para split train/test")
-    parser.add_argument("--test-ratio", type=float, default=0.2, help="Fracao de teste")
-    parser.add_argument("--sg-head-checkpoint", type=str, default=None,
-                        help="Caminho para checkpoint da SGClassifierHead. Se fornecido, substitui o scoring por retrieval no passo de deteccao de nos.")
-    parser.add_argument("--min-patches", type=int, default=2,
-                        help="Tamanho minimo (em patches 32x32) para um componente virar um no")
+    parser = argparse.ArgumentParser(
+        description="SGGen Recall@K — Visual Genome (3-stage pipeline)"
+    )
+    # Data
+    parser.add_argument("--vg-dir", type=str, required=True,
+                        help="Diretorio com dados do VG")
+    parser.add_argument("--max-samples", type=int, default=1000,
+                        help="Limite de amostras de teste")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Seed para split train/test")
+    parser.add_argument("--test-ratio", type=float, default=0.2,
+                        help="Fracao de teste")
+    parser.add_argument("--image-size", type=int, default=256)
+
+    # Vocab sizes (devem corresponder ao treino)
+    parser.add_argument("--n-objects", type=int, default=150)
+    parser.add_argument("--n-preds", type=int, default=50)
+    parser.add_argument("--n-attrs", type=int, default=200)
+
+    # Checkpoints
+    parser.add_argument("--aligner", type=str, default="checkpoints/best_aligner.pth",
+                        help="Checkpoint do LoRACrossAttentionAligner (congelado)")
+    parser.add_argument("--detr-checkpoint", type=str, required=True,
+                        help="Checkpoint do DetrDetector fine-tuned VG-150")
+    parser.add_argument("--rel-head-checkpoint", type=str, required=True,
+                        help="Checkpoint da RelationHead")
+    parser.add_argument("--attr-head-checkpoint", type=str, default=None,
+                        help="Checkpoint da AttributeHead (opcional; omitir pula stage 2)")
+
+    # DETR
+    parser.add_argument("--detr-score-threshold", type=float, default=0.5,
+                        help="Confianca minima para deteccoes DETR")
+
+    # RelationHead
+    parser.add_argument("--edge-threshold", type=float, default=0.0,
+                        help="Threshold de arestas (0.0 = manter todas para ranking)")
+    parser.add_argument("--max-edges-per-pair", type=int, default=1,
+                        help="Predicados por par (top-k) da RelationHead")
+    parser.add_argument("--rel-head-proj-dim", type=int, default=512)
+    parser.add_argument("--rel-head-hidden", type=int, default=1024)
+
+    # AttributeClassifier
+    parser.add_argument("--attr-threshold", type=float, default=0.3)
+    parser.add_argument("--attr-top-k", type=int, default=5)
+
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Device: {device}")
+    autocast_dtype = torch.bfloat16 if device == "cuda" else torch.float32
+    print(f"Device: {device} | dtype: {autocast_dtype}")
     if device == "cuda":
         total = torch.cuda.get_device_properties(0).total_memory / 1e9
         free = (total * 1e9 - torch.cuda.memory_allocated()) / 1e9
@@ -189,10 +276,11 @@ def main() -> None:
 
     # ── 1. Carregar dados VG ────────────────────────────────────────────
     all_sgs = load_scene_graphs(args.vg_dir)
-    obj_list, pred_list, obj_set, pred_set = build_vg150_vocab(all_sgs)
+    obj_list, pred_list, obj_set, pred_set = build_vg150_vocab(
+        all_sgs, n_objects=args.n_objects, n_predicates=args.n_preds
+    )
 
     # ── 2. Split deterministico ─────────────────────────────────────────
-    import random
     rng = random.Random(args.seed)
     indices = list(range(len(all_sgs)))
     rng.shuffle(indices)
@@ -222,81 +310,161 @@ def main() -> None:
 
     # ── 3. Carregar modelos ─────────────────────────────────────────────
     print("\nCarregando modelos...")
-    aligner = LoRACrossAttentionAligner(visual_dim=768, text_dim=4096, rank=64)
-    if os.path.exists(args.checkpoint):
-        aligner.load_state_dict(
-            torch.load(args.checkpoint, map_location=device), strict=False
-        )
-        print(f"  Checkpoint: {args.checkpoint}")
-    else:
-        print(f"  [AVISO] Checkpoint nao encontrado: {args.checkpoint}")
-    aligner.to(device).to(torch.bfloat16).eval()
 
+    # Stage 1: DETR detector
+    if not os.path.exists(args.detr_checkpoint):
+        raise FileNotFoundError(
+            f"DETR checkpoint nao encontrado: {args.detr_checkpoint}"
+        )
+    detector = DetrDetector(
+        checkpoint_path=args.detr_checkpoint,
+        vg150_labels=obj_list,
+        score_threshold=args.detr_score_threshold,
+        device=device,
+    )
+    print(f"  DetrDetector: {args.detr_checkpoint}")
+
+    # DINO (congelado, para feature grid)
     dino = DinoSceneEncoder(device=device)
-    qwen = QwenSceneEmbedder(device=device)
+    for p in dino.model.parameters():
+        p.requires_grad_(False)
 
-    sg_head = None
-    if args.sg_head_checkpoint:
-        if not os.path.exists(args.sg_head_checkpoint):
-            raise FileNotFoundError(f"SG head checkpoint nao encontrado: {args.sg_head_checkpoint}")
-        sg_head = SGClassifierHead(
-            visual_dim=768,
-            vocab_size=len(obj_list),
+    # Aligner (congelado, usa apenas visual_proj 768->4096)
+    aligner = LoRACrossAttentionAligner(visual_dim=768, text_dim=4096, rank=64)
+    if os.path.exists(args.aligner):
+        aligner.load_state_dict(
+            torch.load(args.aligner, map_location=device), strict=False
         )
-        state = torch.load(args.sg_head_checkpoint, map_location=device)
-        sg_head.load_state_dict(state, strict=True)
-        sg_head.to(device).to(torch.bfloat16).eval()
-        print(f"  SG head carregado: {args.sg_head_checkpoint}")
+        print(f"  Aligner: {args.aligner}")
+    else:
+        print(f"  [AVISO] Aligner nao encontrado: {args.aligner} — pesos aleatorios")
+    aligner.to(device).to(autocast_dtype).eval()
+    for p in aligner.parameters():
+        p.requires_grad_(False)
 
-    generator = SceneGraphGenerator(
-        dino_encoder=dino,
-        qwen_embedder=qwen,
+    # Stage 3: RelationPredictor
+    if not os.path.exists(args.rel_head_checkpoint):
+        raise FileNotFoundError(
+            f"Relation head checkpoint nao encontrado: {args.rel_head_checkpoint}"
+        )
+    relation_head = RelationHead(
+        text_dim=4096,
+        vocab_size=len(pred_list),
+        proj_dim=args.rel_head_proj_dim,
+        hidden=args.rel_head_hidden,
+        use_ctx=True,
+    )
+    state = torch.load(args.rel_head_checkpoint, map_location=device)
+    relation_head.load_state_dict(state, strict=True)
+    relation_head.to(device).to(autocast_dtype).eval()
+    print(f"  RelationHead: {args.rel_head_checkpoint}")
+
+    rel_pred = RelationPredictor(
+        relation_head=relation_head,
         aligner=aligner,
-        threshold=args.node_threshold,
+        pred_vocab=pred_list,
         edge_threshold=args.edge_threshold,
-        sg_classifier_head=sg_head,
-        min_patches=args.min_patches,
+        max_edges_per_pair=args.max_edges_per_pair,
     )
 
-    torch.cuda.empty_cache()
+    # Stage 2: AttributeClassifier (opcional)
+    attr_clf = None
+    if args.attr_head_checkpoint and os.path.exists(args.attr_head_checkpoint):
+        attr_list, _ = build_attribute_vocab(all_sgs, n_attrs=args.n_attrs)
+        attribute_head = AttributeHead(
+            feat_dim=4096,
+            vocab_size=len(attr_list),
+        )
+        state = torch.load(args.attr_head_checkpoint, map_location=device)
+        attribute_head.load_state_dict(state, strict=True)
+        attribute_head.to(device).to(autocast_dtype).eval()
+        print(f"  AttributeHead: {args.attr_head_checkpoint}")
 
-    # ── 4. Transform de imagem ──────────────────────────────────────────
-    transform = get_transforms(256)
+        attr_clf = AttributeClassifier(
+            attribute_head=attribute_head,
+            aligner=aligner,
+            attr_vocab=attr_list,
+            score_threshold=args.attr_threshold,
+            top_k=args.attr_top_k,
+        )
+    else:
+        print("  AttributeClassifier: desabilitado (sem checkpoint)")
+
+    if device == "cuda":
+        torch.cuda.empty_cache()
+
+    # ── 4. Transform de imagem (para DINO) ──────────────────────────────
+    transform = get_transforms(args.image_size)
 
     # ── 5. Avaliacao SGGen ──────────────────────────────────────────────
     K_VALUES = [20, 50, 100]
 
     all_recalls: dict[int, list[float]] = {k: [] for k in K_VALUES}
-    # Para mR@K: acumula recalls por predicado, por K
     per_pred_accum: dict[int, dict[str, list[float]]] = {
         k: defaultdict(list) for k in K_VALUES
     }
     n_gt_triples_total = 0
     n_pred_triples_total = 0
+    n_detections_total = 0
 
     print(f"\nIniciando SGGen Recall@K ({len(test_samples)} amostras)...")
-    print(f"  Candidatos: {len(obj_list)} objetos, {len(pred_list)} predicados")
-    print(f"  Node threshold: {args.node_threshold}, Edge threshold: {args.edge_threshold}")
+    print(f"  Vocabulario: {len(obj_list)} objetos, {len(pred_list)} predicados")
+    print(f"  DETR threshold: {args.detr_score_threshold}")
+    print(f"  Edge threshold: {args.edge_threshold}")
 
     try:
-        for i, sample in enumerate(
-            tqdm(test_samples, desc="SGGen Eval")
-        ):
-            img = Image.open(sample["img_path"]).convert("RGB")
-            img_tensor = transform(img)
+        for i, sample in enumerate(tqdm(test_samples, desc="SGGen Eval")):
+            # Abre imagem
+            img_pil = Image.open(sample["img_path"]).convert("RGB")
+            img_pil_resized = img_pil.resize(
+                (args.image_size, args.image_size), Image.BILINEAR
+            )
 
-            sg_result = generator.generate(img_tensor, obj_list, pred_list)
-            pred_triples = extract_pred_triples(sg_result)
+            # Stage 1: DETR — deteccao de objetos
+            detections = detector.detect(
+                img_pil_resized,
+                image_size=args.image_size,
+                image_size_grid=32,
+            )
+            n_detections_total += len(detections)
+
             gt = sample["gt"]
-
             n_gt_triples_total += len(gt)
+
+            if len(detections) == 0:
+                for k in K_VALUES:
+                    all_recalls[k].append(0.0)
+                continue
+
+            # DINO: extrair visual grid [1, 32, 32, 768]
+            img_tensor = transform(img_pil)                    # [3, H, W]
+            visual_grid = extract_visual_grid(
+                dino, img_tensor, device, autocast_dtype
+            )                                                  # [1, 32, 32, 768]
+
+            # Stage 2: atributos (opcional, enriquece detections)
+            if attr_clf is not None:
+                detections = attr_clf.predict(detections, visual_grid)
+
+            # Stage 3: relacoes entre pares
+            edges = rel_pred.predict(detections, visual_grid)
+
+            # Compor scene graph dict para metricas
+            nodes = []
+            for idx, det in enumerate(detections):
+                node = det.to_node_dict()
+                node["id"] = idx
+                nodes.append(node)
+            sg_result = {"nodes": nodes, "edges": edges}
+
+            # Extrair tripletas e computar metricas
+            pred_triples = extract_pred_triples(sg_result)
             n_pred_triples_total += len(pred_triples)
 
             for k in K_VALUES:
                 r = recall_at_k(pred_triples, gt, k)
                 all_recalls[k].append(r)
 
-                # Per-predicate recall para mR@K
                 pp = per_predicate_recall(pred_triples, gt, k)
                 for pred, val in pp.items():
                     if val is not None:
@@ -305,12 +473,13 @@ def main() -> None:
             # Log periodico
             if (i + 1) % 50 == 0:
                 r50_so_far = sum(all_recalls[50]) / len(all_recalls[50])
-                nodes_avg = sum(len(s["sg"].get("nodes", [])) for s in test_samples[:i+1]) / (i + 1)
+                avg_dets = n_detections_total / (i + 1)
                 print(
                     f"  [{i+1}/{len(test_samples)}] "
                     f"R@50={r50_so_far:.4f}  "
-                    f"GT triples/img={n_gt_triples_total/(i+1):.1f}  "
-                    f"Pred triples/img={n_pred_triples_total/(i+1):.1f}"
+                    f"Dets/img={avg_dets:.1f}  "
+                    f"GT/img={n_gt_triples_total/(i+1):.1f}  "
+                    f"Pred/img={n_pred_triples_total/(i+1):.1f}"
                 )
 
     except RuntimeError as e:
@@ -319,6 +488,8 @@ def main() -> None:
         raise
 
     # ── 6. Resultados ───────────────────────────────────────────────────
+    n_eval = max(len(test_samples), 1)
+
     def safe_mean(vals: list[float]) -> float:
         return sum(vals) / len(vals) if vals else 0.0
 
@@ -339,10 +510,12 @@ def main() -> None:
     print("\n" + "=" * 60)
     print("SGGen Recall@K — Visual Genome (VG-150)")
     print("=" * 60)
+    print(f"  Pipeline           : DETR + Attr + Rel (3-stage)")
     print(f"  Amostras avaliadas : {len(test_samples)}")
-    print(f"  GT triples/img    : {n_gt_triples_total / len(test_samples):.1f}")
-    print(f"  Pred triples/img  : {n_pred_triples_total / len(test_samples):.1f}")
-    print(f"  Predicados c/ GT  : {len(per_pred_accum[50])}")
+    print(f"  Dets/img           : {n_detections_total / n_eval:.1f}")
+    print(f"  GT triples/img     : {n_gt_triples_total / n_eval:.1f}")
+    print(f"  Pred triples/img   : {n_pred_triples_total / n_eval:.1f}")
+    print(f"  Predicados c/ GT   : {len(per_pred_accum[50])}")
     print()
     print("  Recall@K:")
     for k in K_VALUES:
@@ -357,21 +530,29 @@ def main() -> None:
     results_dir = "results"
     os.makedirs(results_dir, exist_ok=True)
     timestamp_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_path = os.path.join(results_dir, f"sggen_vg150_results_{timestamp_tag}.json")
+    output_path = os.path.join(
+        results_dir, f"sggen_vg150_results_{timestamp_tag}.json"
+    )
 
     output = {
         "metadata": {
             "timestamp": datetime.now().isoformat(),
             "benchmark": "Visual Genome VG-150",
+            "pipeline": "3-stage (DetrDetector + AttributeClassifier + RelationPredictor)",
             "num_samples": len(test_samples),
-            "node_threshold": args.node_threshold,
+            "image_size": args.image_size,
+            "detr_checkpoint": args.detr_checkpoint,
+            "detr_score_threshold": args.detr_score_threshold,
+            "aligner_checkpoint": args.aligner,
+            "rel_head_checkpoint": args.rel_head_checkpoint,
+            "attr_head_checkpoint": args.attr_head_checkpoint,
             "edge_threshold": args.edge_threshold,
-            "checkpoint": args.checkpoint,
-            "sg_head_checkpoint": args.sg_head_checkpoint,
+            "max_edges_per_pair": args.max_edges_per_pair,
             "vocab_objects": len(obj_list),
             "vocab_predicates": len(pred_list),
-            "avg_gt_triples": n_gt_triples_total / len(test_samples),
-            "avg_pred_triples": n_pred_triples_total / len(test_samples),
+            "avg_detections": n_detections_total / n_eval,
+            "avg_gt_triples": n_gt_triples_total / n_eval,
+            "avg_pred_triples": n_pred_triples_total / n_eval,
         },
         "recall": recall_results,
         "mean_recall": mean_recall_results,

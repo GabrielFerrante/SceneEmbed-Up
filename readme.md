@@ -9,50 +9,50 @@ Pipeline de pesquisa que combina **DINOv3** (encoder visual + upsampling HR) + *
 ## Visão Geral da Arquitetura
 
 ```
-RAW IMAGE [3, 640, 640]
+RAW IMAGE (PIL)
          │
          ├───────────────────────────────────────────────┐
          ▼                                               ▼
- DinoSceneEncoder                                  DetrDetector
- cls_token     [1, 768]                         DETR-R50, 150 classes
- hr_features   [1, 768, 686, 960]              logits [1, 300, 151]
-         │                                     pred_boxes [1, 300, 4]
-         │  adaptive_avg_pool2d(32×32)                   │
-         ▼                                               ▼
-   [B, 768, 32, 32]                             list[Detection]
-         │                                      .bbox_xyxy [4] pixels
-         │  reshape                              .bbox_grid [4] (0..32)
-         ▼                                      .label, .score
-   [B, 1024, 768]                                       │
-         │                                              │
-         │        QwenSceneEmbedder                     │
-         │        text_queries [B, 1, 4096]             │
-         │                │                             │
-         ▼                ▼                             │
-  LoRACrossAttentionAligner                             │
-   v_features   [B, 1024, 4096]  ─────────────────────┐│
-   attn_output  [B, 1, 4096]                          ││
-   attn_weights [B, 8, 1, 1024]                       ▼▼
-   (usado em retrieval)                  visual_grid [1, 32, 32, 768]
-                                                      │
-                         ┌────────────────────────────┤
-                         ▼                            ▼
-               AttributeClassifier            RelationPredictor
-               ROI mean-pool per bbox         P = N(N-1) pares
-               [M, 768] → [M, 4096]          sub/obj/union → [P, 768]
-               AttributeHead [M, 200]        project → [P, 4096]
-               sigmoid + top-5 attrs         RelationHead → [P, 50]
-                         │                            │
-                         └────────────┬───────────────┘
-                                      ▼
-                                 Scene Graph
-                            nodes: objetos + atributos
-                            edges: (sub, pred, obj, conf)
-                                      │
-                                      ▼
-                          KnowledgeGraphGenerator
-                          is_a, part_of, made_of,
-                          used_for, has_property
+ DinoSceneEncoder                                 MdetrDetector
+ cls_token     [1, 768]                   MDETR pré-treinado no VG
+ hr_features   [1, 768, H_hr, W_hr]      text query: "person . sky . ..."
+         │                               pred_logits [1, Q, seq_len]
+         │  adaptive_avg_pool2d(32×32)   pred_boxes  [1, Q, 4]
+         ▼                                               │
+   [B, 768, 32, 32]                                      ▼
+         │                                       list[Detection]
+         │  reshape + permute                    .bbox_xyxy [4] pixels
+         ▼                                       .bbox_grid [4] (0..32)
+   [B, 32, 32, 768]                              .label, .score
+         │                                               │
+         │        QwenSceneEmbedder                      │
+         │        text_queries [B, 1, 4096]              │
+         │                │                              │
+         ▼                ▼                              │
+  LoRACrossAttentionAligner                              │
+   v_features   [B, 1024, 4096]  ──────────────────────┐│
+   attn_output  [B, 1, 4096]                           ││
+   attn_weights [B, 8, 1, 1024]                        ▼▼
+   (usado em retrieval)                 visual_grid [1, 32, 32, 768]
+                                                       │
+                        ┌──────────────────────────────┤
+                        ▼                              ▼
+              AttributeClassifier             RelationPredictor
+              ROI mean-pool por bbox          P = N(N-1) pares
+              [M, 768] → [M, 4096]           sub/obj/union → [P, 768]
+              AttributeHead [M, 200]         project → [P, 4096]
+              sigmoid + top-5 attrs          RelationHead → [P, 50]
+                        │                              │
+                        └────────────┬─────────────────┘
+                                     ▼
+                                Scene Graph
+                           nodes: objetos + atributos
+                           edges: (sub, pred, obj, conf)
+                                     │
+                                     ▼
+                         KnowledgeGraphGenerator
+                         is_a, part_of, made_of,
+                         used_for, has_property
 ```
 
 ---
@@ -71,9 +71,9 @@ RAW IMAGE [3, 640, 640]
 | Saída | Shape | Descrição |
 |---|---|---|
 | `cls_token` | `[1, 768]` | Descritor global da imagem |
-| `hr_features` | `[1, 768, 686, 960]` (anyup) / `[1, 384, 224, 224]` (featup) | Features espaciais HR |
+| `hr_features` | `[1, 768, H_hr, W_hr]` (anyup) | Features espaciais HR |
 
-Pipeline interno: DINOv3 → `[B, N_total, 768]` → extrai patches espaciais → reshape `[B, 768, h, w]` → upsample.
+Pipeline interno: DINOv3 → `[B, N_total, 768]` → extrai patches espaciais → reshape `[B, 768, h, w]` → upsample → pool `[B, 768, 32, 32]`.
 
 ---
 
@@ -98,7 +98,6 @@ Adiciona prefix de instrução a cada texto, tokeniza, forward, mean pooling sob
 | `text_dim` | 4096 |
 | `rank` | 64 |
 | `num_heads` | 8 |
-| `alpha` | 32 (`scaling = alpha/rank`) |
 
 **Forward:**
 
@@ -135,29 +134,29 @@ loss = contrastive_loss + 0.05 * entropy_reg
 
 ---
 
-### DetrDetector `models/detectors/detr_detector.py`
+### MdetrDetector `models/detectors/mdetr_detector.py`
 
-DETR-R50 fine-tunado para 150 classes do Visual Genome.
+Detector open-vocabulary pré-treinado no Visual Genome. Não requer fine-tuning.
 
 | Parâmetro | Valor |
 |---|---|
-| queries | 300 (padrão DETR) |
-| input size | 640×640 |
+| checkpoint | `ashkamath/mdetr-resnet-50` (HuggingFace Hub) |
 | `score_threshold` | 0.5 |
+| text query | `"person . sky . building . ..."` (150 classes VG-150) |
 
 **`detect(image)` → `list[Detection]`**
 
 ```python
 @dataclass
 class Detection:
-    bbox_xyxy:  Tensor   # [4] coordenadas em pixels (0..640)
+    bbox_xyxy:  Tensor   # [4] coordenadas em pixels
     bbox_grid:  Tensor   # [4] coordenadas em grid (0..32)
     label:      str
     label_idx:  int
     score:      float
 ```
 
-Pipeline: `logits [1, 300, 151]` → softmax → filtro por score → cxcywh (norm) → xyxy (pixels) → escala grid (`× 32/640`).
+Pipeline: `pred_logits [Q, seq_len]` → sigmoid → max sobre tokens do texto → mapeamento token→classe via `offset_mapping` → filtro por score → cxcywh (norm) → xyxy (pixels) → escala grid.
 
 ---
 
@@ -246,7 +245,6 @@ Expande o scene graph com fatos taxonômicos via cache ou Qwen3 LLM.
 **Relações:** `is_a`, `part_of`, `made_of`, `used_for`, `has_property`
 
 ```python
-# Saída
 {
   "entities":      [str, ...],
   "factual_edges": [{"sub": str, "rel": str, "obj": str}, ...]
@@ -257,10 +255,10 @@ Expande o scene graph com fatos taxonômicos via cache ou Qwen3 LLM.
 
 ### Módulos de Upsampling `models/ups/hr_conversions.py`
 
-| Módulo | Saída | Método |
-|---|---|---|
-| `AnyUpModel` | `[B, 768, 224, 224]` | PyTorch Hub `wimmerth/anyup` |
-| `JBUStack` | `[B, 384, 224, 224]` | 4 estágios JBU progressivos (×2 cada = ×16 total) |
+| Módulo | Método |
+|---|---|
+| `AnyUpModel` | PyTorch Hub `wimmerth/anyup` |
+| `JBUStack` | 4 estágios JBU progressivos (×2 cada = ×16 total) |
 
 ---
 
@@ -277,7 +275,7 @@ SceneEmbed-Up/
 │   ├── ups/
 │   │   └── hr_conversions.py         # AnyUpModel, JBUStack
 │   ├── detectors/
-│   │   └── detr_detector.py          # DetrDetector
+│   │   └── mdetr_detector.py         # MdetrDetector (pré-treinado VG)
 │   └── SG/
 │       ├── attribute_head.py         # AttributeHead (200 classes)
 │       ├── attribute_classifier.py   # AttributeClassifier
@@ -286,14 +284,14 @@ SceneEmbed-Up/
 │       └── knowledge.py             # KnowledgeGraphGenerator
 ├── data/
 │   ├── data_utils_pytorch.py         # Datasets/DataLoaders COYO + shards H5
-│   └── vg_detection_dataset.py       # Visual Genome VG-150
+│   └── vg_dataset.py                 # Visual Genome VG-150 (vocab, splits, datasets)
 ├── embeddings/
-│   └── generate_shards.py            # Exportação de embeddings H5
+│   ├── generate_shards.py            # Exportação de embeddings COYO → H5
+│   └── generate_vg_attr_shards.py    # Exportação de features VG por objeto → H5
 ├── train_aligner_with_h5.py          # Treino do Aligner (shards H5)
 ├── train_aligner_with_Images.py      # Treino do Aligner (imagens direto)
-├── train_detr_vg150.py               # Fine-tuning do DETR-R50
-├── train_attribute_head.py           # Treino da AttributeHead (GT bboxes)
-├── train_relation_head.py            # Treino da RelationHead (GT bboxes)
+├── train_attribute_head.py           # Treino da AttributeHead (shards H5 VG)
+├── train_relation_head.py            # Treino da RelationHead (GT bboxes VG)
 ├── eval_retrieval_with_h5.py         # Recall@K bidirecional (shards H5)
 ├── eval_retrieval_with_images.py     # Recall@K bidirecional (imagens)
 └── eval_sg_vg.py                     # SGGen Recall@K / mR@K no VG
@@ -303,7 +301,7 @@ SceneEmbed-Up/
 
 ## Treinamento
 
-Dois estágios independentes:
+### Ordem recomendada
 
 **1. Aligner** — treinado em COYO-700M com InfoNCE + entropy_reg:
 
@@ -312,13 +310,20 @@ python train_aligner_with_h5.py          # recomendado (shards pré-computados)
 python train_aligner_with_Images.py      # requer VRAM > 16 GB
 ```
 
-**2. Heads VG-150** — Aligner + DINO congelados (setup PredCls-like, bboxes GT):
+**2. Extração de features VG** — DINO congelado, ROI-pool por objeto:
 
 ```bash
-python train_detr_vg150.py               # fine-tuning do detector
+python embeddings/generate_vg_attr_shards.py   # obj_feats [N,768] + attr_labels [N,200]
+```
+
+**3. Heads VG-150** — Aligner congelado:
+
+```bash
 python train_attribute_head.py           # AttributeHead, loss: BCE multi-label
 python train_relation_head.py            # RelationHead, loss: CE multi-class
 ```
+
+> O detector **MdetrDetector** não requer treino — usa checkpoint `ashkamath/mdetr-resnet-50` pré-treinado no Visual Genome diretamente do HuggingFace Hub.
 
 ---
 
@@ -327,17 +332,26 @@ python train_relation_head.py            # RelationHead, loss: CE multi-class
 | Dataset | Uso |
 |---|---|
 | COYO-700M (~15M imgs) | Treino do Aligner |
-| Visual Genome (VG-150) | Treino DETR, AttributeHead, RelationHead |
+| Visual Genome (VG-150) | Extração de features, AttributeHead, RelationHead |
 
-**Shards H5 (Aligner):**
+**Shards H5 — Aligner (COYO):**
 
 | Campo | Shape | Dtype |
 |---|---|---|
-| `visual_feats` | `[N, 1024, 768]` | bfloat16 |
-| `text_feats` | `[N, 1, 4096]` | bfloat16 |
-| `visual_global` | `[N, 768]` | bfloat16 |
+| `visual_feats` | `[N, 1024, 768]` | float16 |
+| `text_feats` | `[N, 1, 4096]` | float16 |
+| `visual_global` | `[N, 768]` | float16 |
 
 ~7 GB por shard de 5k amostras (gzip).
+
+**Shards H5 — AttributeHead (VG):**
+
+| Campo | Shape | Dtype |
+|---|---|---|
+| `obj_feats` | `[N, 768]` | float16 |
+| `attr_labels` | `[N, 200]` | float16 |
+
+~400–600 MB total (todos os objetos VG-150 anotados com atributos).
 
 ---
 
@@ -345,7 +359,7 @@ python train_relation_head.py            # RelationHead, loss: CE multi-class
 
 | Tipo | Métrica | Descrição |
 |---|---|---|
-| Retrieval | `I2T/T2I Recall@K` | Top-K bidireccional |
+| Retrieval | `I2T/T2I Recall@K` | Top-K bidirecional |
 | SGG | `R@20/50/100` | Recall sobre tripletas (sub, pred, obj) |
 | SGG | `mR@20/50/100` | Mean Recall por classe de predicado |
 
@@ -364,6 +378,7 @@ python train_relation_head.py            # RelationHead, loss: CE multi-class
 
 - [DINOv3](https://github.com/facebookresearch/dinov3) — Meta AI
 - [Qwen3-Embedding-8B](https://huggingface.co/Qwen/Qwen3-Embedding-8B) — Alibaba Cloud
+- [MDETR](https://github.com/ashkamath/mdetr) — Kamath et al., ICCV 2021
 - [AnyUp](https://github.com/wimmerth/anyup) — Wimmer et al.
 - [FeatUp](https://github.com/mhamilton723/FeatUp) — Hamilton et al.
 - [COYO-700M](https://github.com/kakaobrain/coyo-dataset) — Kakao Brain

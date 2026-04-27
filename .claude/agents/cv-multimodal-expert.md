@@ -97,7 +97,7 @@ Use quando a tarefa envolver:
 - Debug de pipelines multimodais (contrastive collapse, attention difusa,
   retrieval baixo, NaN em loss)
 - Revisao de codigo em `models/encoders/`, `models/aligners/`, `models/SG/`,
-  `models/ups/`
+  `models/ups/`, `models/detectors/`
 - Analise de metricas de retrieval (Recall@K) ou de scene/knowledge graph
 - Hiperparametros: temperatura contrastiva, target entropy, rank/alpha LoRA,
   num_heads, batch size para treino contrastivo

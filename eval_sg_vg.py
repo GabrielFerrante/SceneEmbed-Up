@@ -53,7 +53,7 @@ from data.vg_dataset import (
     load_scene_graphs,
 )
 from models.aligners.lora_cross_attention import LoRACrossAttentionAligner
-from models.detectors.detr_detector import DetrDetector
+from models.detectors.mdetr_detector import Detection, MdetrDetector
 from models.encoders.dinov3_extrator import DinoSceneEncoder
 from models.SG.attribute_classifier import AttributeClassifier
 from models.SG.attribute_head import AttributeHead
@@ -231,7 +231,7 @@ def main() -> None:
                         help="Seed para split train/test")
     parser.add_argument("--test-ratio", type=float, default=0.2,
                         help="Fracao de teste")
-    parser.add_argument("--image-size", type=int, default=256)
+    parser.add_argument("--image-size", type=int, default=448)
 
     # Vocab sizes (devem corresponder ao treino)
     parser.add_argument("--n-objects", type=int, default=150)
@@ -241,16 +241,14 @@ def main() -> None:
     # Checkpoints
     parser.add_argument("--aligner", type=str, default="checkpoints/best_aligner.pth",
                         help="Checkpoint do LoRACrossAttentionAligner (congelado)")
-    parser.add_argument("--detr-checkpoint", type=str, required=True,
-                        help="Checkpoint do DetrDetector fine-tuned VG-150")
+    parser.add_argument(
+        "--score-threshold", type=float, default=0.5,
+        help="Confianca minima para deteccoes MDETR"
+    )
     parser.add_argument("--rel-head-checkpoint", type=str, required=True,
                         help="Checkpoint da RelationHead")
     parser.add_argument("--attr-head-checkpoint", type=str, default=None,
                         help="Checkpoint da AttributeHead (opcional; omitir pula stage 2)")
-
-    # DETR
-    parser.add_argument("--detr-score-threshold", type=float, default=0.5,
-                        help="Confianca minima para deteccoes DETR")
 
     # RelationHead
     parser.add_argument("--edge-threshold", type=float, default=0.0,
@@ -311,18 +309,13 @@ def main() -> None:
     # ── 3. Carregar modelos ─────────────────────────────────────────────
     print("\nCarregando modelos...")
 
-    # Stage 1: DETR detector
-    if not os.path.exists(args.detr_checkpoint):
-        raise FileNotFoundError(
-            f"DETR checkpoint nao encontrado: {args.detr_checkpoint}"
-        )
-    detector = DetrDetector(
-        checkpoint_path=args.detr_checkpoint,
+    # Stage 1: MDETR detector
+    detector = MdetrDetector(
         vg150_labels=obj_list,
-        score_threshold=args.detr_score_threshold,
+        score_threshold=args.score_threshold,
         device=device,
     )
-    print(f"  DetrDetector: {args.detr_checkpoint}")
+    print("  MdetrDetector: ashkamath/mdetr-resnet-50")
 
     # DINO (congelado, para feature grid)
     dino = DinoSceneEncoder(device=device)
@@ -409,7 +402,7 @@ def main() -> None:
 
     print(f"\nIniciando SGGen Recall@K ({len(test_samples)} amostras)...")
     print(f"  Vocabulario: {len(obj_list)} objetos, {len(pred_list)} predicados")
-    print(f"  DETR threshold: {args.detr_score_threshold}")
+    print(f"  Score threshold: {args.score_threshold}")
     print(f"  Edge threshold: {args.edge_threshold}")
 
     try:
@@ -538,11 +531,12 @@ def main() -> None:
         "metadata": {
             "timestamp": datetime.now().isoformat(),
             "benchmark": "Visual Genome VG-150",
-            "pipeline": "3-stage (DetrDetector + AttributeClassifier + RelationPredictor)",
+            "pipeline": "3-stage (MdetrDetector + AttributeClassifier + RelationPredictor)",
             "num_samples": len(test_samples),
             "image_size": args.image_size,
-            "detr_checkpoint": args.detr_checkpoint,
-            "detr_score_threshold": args.detr_score_threshold,
+            "detector": "mdetr",
+            "detector_checkpoint": "ashkamath/mdetr-resnet-50",
+            "score_threshold": args.score_threshold,
             "aligner_checkpoint": args.aligner,
             "rel_head_checkpoint": args.rel_head_checkpoint,
             "attr_head_checkpoint": args.attr_head_checkpoint,

@@ -17,8 +17,9 @@ def get_transforms(image_size=256):
     Define o pipeline de pré-processamento da imagem.
     """
     return transforms.Compose([
+        transforms.Resize((image_size, image_size)),
         transforms.ToTensor(),
-        transforms.Resize((image_size, image_size)), # Garante tamanho fixo
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
     
 class CoyoCollate:
@@ -316,6 +317,150 @@ class ShardedH5Dataset_withHD(Dataset):
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         return self._visual[idx], self._text[idx]
+
+class ShardedH5AttributeDataset_withSSD(torch.utils.data.Dataset):
+    """
+    Dataset de atributos VG para SSD: abre H5 lazily por amostra.
+
+    Espera shards com keys:
+      obj_feats   : [N, 768]      features DINO pos-ROI-pool por objeto
+      attr_labels : [N, n_attrs]  multi-hot bfloat16
+    """
+
+    def __init__(self, folder_path: str):
+        search_pattern = os.path.join(folder_path, "**", "*.h5")
+        shard_files = sorted(glob.glob(search_pattern, recursive=True))
+        if not shard_files:
+            raise RuntimeError(f"Nenhum .h5 encontrado em {folder_path}")
+
+        self._index: list[tuple[str, int]] = []
+        for path in shard_files:
+            try:
+                with h5py.File(path, "r") as f:
+                    n = f["obj_feats"].shape[0]
+                for i in range(n):
+                    self._index.append((path, i))
+            except Exception as e:
+                print(f"[WARN] Shard ignorado: {path} — {e}")
+
+        if not self._index:
+            raise RuntimeError("Nenhuma amostra valida nos shards.")
+
+        self._handles: dict[str, h5py.File] = {}
+        print(f"[ShardedH5AttributeDataset_withSSD] {len(self._index):,} objetos em {len(shard_files)} shards")
+
+    def _get_handle(self, path: str) -> h5py.File:
+        if path not in self._handles:
+            self._handles[path] = h5py.File(path, "r")
+        return self._handles[path]
+
+    def __len__(self) -> int:
+        return len(self._index)
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        path, local_idx = self._index[idx]
+        f = self._get_handle(path)
+        feats  = torch.from_numpy(f["obj_feats"][local_idx].copy())    # [768]
+        labels = torch.from_numpy(f["attr_labels"][local_idx].copy())  # [n_attrs]
+        return feats, labels
+
+    def __del__(self):
+        for f in self._handles.values():
+            try: f.close()
+            except Exception: pass
+
+
+class ShardedH5AttributeDataset_withHD(Dataset):
+    """
+    Dataset de atributos VG com buffer rotativo em RAM (para HDD/NVMe lentos).
+
+    Espera shards com keys:
+      obj_feats   : [N, 768]      features DINO pos-ROI-pool por objeto
+      attr_labels : [N, n_attrs]  multi-hot bfloat16
+
+    Uso: igual ao ShardedH5Dataset_withHD — chame rotate_buffer() ao fim
+    de cada época ou de cada shard iteration.
+    """
+
+    def __init__(self, folder_path: str, shards_in_memory: int = 9, shuffle_shards: bool = True):
+        search_pattern = os.path.join(folder_path, "**", "*.h5")
+        self._all_shards = sorted(glob.glob(search_pattern, recursive=True))
+        if not self._all_shards:
+            raise RuntimeError(f"Nenhum .h5 encontrado em {folder_path}")
+
+        self.shards_in_memory = shards_in_memory
+        self.shuffle_shards   = shuffle_shards
+        self._shard_queue: list[str] = []
+
+        self._feats:  torch.Tensor | None = None
+        self._labels: torch.Tensor | None = None
+        self._next_feats:  torch.Tensor | None = None
+        self._next_labels: torch.Tensor | None = None
+        self._prefetch_thread: threading.Thread | None = None
+
+        self._reset_queue()
+        self._load_next_buffer_sync()
+        self._start_prefetch()
+
+    def _reset_queue(self) -> None:
+        self._shard_queue = list(self._all_shards)
+        if self.shuffle_shards:
+            random.shuffle(self._shard_queue)
+
+    def _load_shards(self, paths: list[str]) -> tuple[torch.Tensor, torch.Tensor]:
+        feats_list, labels_list = [], []
+        for path in tqdm(paths, desc="  Carregando shards attr", leave=False):
+            try:
+                with h5py.File(path, "r") as f:
+                    feats_list.append(torch.from_numpy(f["obj_feats"][:]))
+                    labels_list.append(torch.from_numpy(f["attr_labels"][:]))
+            except Exception as e:
+                print(f"[WARN] Shard ignorado: {path} — {e}")
+        if not feats_list:
+            raise RuntimeError("Nenhum shard valido carregado.")
+        return torch.cat(feats_list, dim=0), torch.cat(labels_list, dim=0)
+
+    def _load_next_buffer_sync(self) -> None:
+        if not self._shard_queue:
+            self._reset_queue()
+        batch = self._shard_queue[:self.shards_in_memory]
+        self._shard_queue = self._shard_queue[self.shards_in_memory:]
+        print(f"\n[Buffer] Carregando {len(batch)} shards attr em memoria...")
+        self._feats, self._labels = self._load_shards(batch)
+        print(f"[Buffer] {len(self._feats):,} objetos disponiveis.")
+
+    def _start_prefetch(self) -> None:
+        if not self._shard_queue:
+            return
+        batch = self._shard_queue[:self.shards_in_memory]
+
+        def _worker():
+            self._next_feats, self._next_labels = self._load_shards(batch)
+
+        self._prefetch_thread = threading.Thread(target=_worker, daemon=True)
+        self._prefetch_thread.start()
+
+    def rotate_buffer(self) -> None:
+        if self._prefetch_thread is not None:
+            self._prefetch_thread.join()
+            self._prefetch_thread = None
+        if self._next_feats is not None:
+            self._shard_queue = self._shard_queue[self.shards_in_memory:]
+            self._feats  = self._next_feats
+            self._labels = self._next_labels
+            self._next_feats  = None
+            self._next_labels = None
+            print(f"\n[Buffer] Rotacionado — {len(self._feats):,} objetos em memoria.")
+        else:
+            self._load_next_buffer_sync()
+        self._start_prefetch()
+
+    def __len__(self) -> int:
+        return len(self._feats)
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        return self._feats[idx], self._labels[idx]
+
 
 def create_all_dataloaders( #USAR SE TIVER MEMÓRIA VRAM O SUFICIENTE
     root_dir, 

@@ -1,59 +1,115 @@
 # SceneEmbed-Up
 
-**Alinhamento Multimodal de Alta Resolução para Geração de Scene Graphs**
+**Alinhamento Multimodal de Alta Resolução com Visualização via Scene Graphs**
 
-Pipeline de pesquisa que combina **DINOv3** (encoder visual + upsampling HR) + **Qwen3-Embedding-8B** (encoder textual) + **LoRA Cross-Attention Aligner** para aprender um espaço de embeddings compartilhado e gerar Scene Graphs semânticos enriquecidos com Knowledge Graphs.
+Pipeline de pesquisa que combina **DINOv3** (encoder visual + upsampling HR) + **Qwen3-Embedding-8B** (encoder textual) + **LoRA Cross-Attention Aligner** para aprender um espaço de embeddings compartilhado sobre dados COYO. Scene Graphs são gerados pelo modelo pré-treinado **RelTR** para visualização e explicabilidade dos resultados de retrieval.
 
 ---
 
 ## Visão Geral da Arquitetura
 
 ```
-RAW IMAGE (PIL)
-         │
-         ├───────────────────────────────────────────────┐
-         ▼                                               ▼
- DinoSceneEncoder                                 MdetrDetector
- cls_token     [1, 768]                   MDETR pré-treinado no VG
- hr_features   [1, 768, H_hr, W_hr]      text query: "person . sky . ..."
-         │                               pred_logits [1, Q, seq_len]
-         │  adaptive_avg_pool2d(32×32)   pred_boxes  [1, Q, 4]
-         ▼                                               │
-   [B, 768, 32, 32]                                      ▼
-         │                                       list[Detection]
-         │  reshape + permute                    .bbox_xyxy [4] pixels
-         ▼                                       .bbox_grid [4] (0..32)
-   [B, 32, 32, 768]                              .label, .score
-         │                                               │
-         │        QwenSceneEmbedder                      │
-         │        text_queries [B, 1, 4096]              │
-         │                │                              │
-         ▼                ▼                              │
-  LoRACrossAttentionAligner                              │
-   v_features   [B, 1024, 4096]  ──────────────────────┐│
-   attn_output  [B, 1, 4096]                           ││
-   attn_weights [B, 8, 1, 1024]                        ▼▼
-   (usado em retrieval)                 visual_grid [1, 32, 32, 768]
-                                                       │
-                        ┌──────────────────────────────┤
-                        ▼                              ▼
-              AttributeClassifier             RelationPredictor
-              ROI mean-pool por bbox          P = N(N-1) pares
-              [M, 768] → [M, 4096]           sub/obj/union → [P, 768]
-              AttributeHead [M, 200]         project → [P, 4096]
-              sigmoid + top-5 attrs          RelationHead → [P, 50]
-                        │                              │
-                        └────────────┬─────────────────┘
-                                     ▼
-                                Scene Graph
-                           nodes: objetos + atributos
-                           edges: (sub, pred, obj, conf)
-                                     │
-                                     ▼
-                         KnowledgeGraphGenerator
-                         is_a, part_of, made_of,
-                         used_for, has_property
+QUERY TEXTUAL                    IMAGENS COYO (indexadas)
+      │                                    │
+      ▼                                    ▼
+QwenSceneEmbedder              DinoSceneEncoder
+[1, 1, 4096]                   hr_features [B, 768, 32, 32]
+      │                                    │
+      │                         reshape + permute
+      │                         [B, 1024, 768]
+      │                                    │
+      └──────────┬────────────────────────┘
+                 ▼
+     LoRACrossAttentionAligner
+     Q=text, K=V=visual (LoRA rank=64)
+     attn_output [B, 1, 4096]
+                 │
+          L2 normalize
+                 │
+         Similaridade Cosseno
+                 │
+         Top-K Imagens Recuperadas
+                 │
+                 ▼
+            RelTR (pré-treinado VG-150)
+            end-to-end, sem fine-tuning
+                 │
+         Scene Graph (triplas + bboxes)
+                 │
+                 ▼
+         Visualização (imagem + dígrafo)
+         results/sg_viz/
 ```
+
+---
+
+## Pipeline de Execução
+
+### Fase 0 — Dados COYO
+
+```bash
+python data/get_metadados_coyo.py
+python data/get_small_sample_coyo.py
+python data/extract_files_coyo.py
+python embeddings/generate_shards.py          # → shards H5 (visual+text embeddings)
+```
+
+### Fase 1 — Aligner (COYO)
+
+```bash
+# Opção A: shards pré-computados (recomendado, VRAM ~8 GB)
+python train_aligner_with_h5.py
+
+# Opção B: imagens direto (requer VRAM > 16 GB)
+python train_aligner_with_Images.py
+
+# → checkpoints/best_aligner.pth
+
+# Avaliação Recall@K
+python eval_retrieval_with_h5.py
+```
+
+### Fase 2 — Setup RelTR
+
+```bash
+git clone https://github.com/yrcong/RelTR.git reltr_repo
+mkdir -p checkpoints/reltr
+# Baixar pesos VG-150:
+# Salvar em: checkpoints/reltr/reltr_vg.pth
+```
+
+### Fase 3 — Retrieval + Scene Graph
+
+```bash
+python eval_retrieval_sg.py --query "a dog on a skateboard" --top_k 5
+python eval_retrieval_sg.py --query "person riding bike" --top_k 3 --threshold 0.2
+
+# Opções completas:
+#   --image_dir     diretório com imagens COYO (default: data/coyo_sample)
+#   --top_k         número de imagens a recuperar (default: 5)
+#   --threshold     score mínimo RelTR para incluir tripla (default: 0.3)
+#   --num_queries   número de triplas RelTR por imagem (default: 20)
+#   --aligner_ckpt  checkpoint do aligner (default: checkpoints/best_aligner.pth)
+#   --reltr_ckpt    checkpoint RelTR (default: checkpoints/reltr/reltr_vg.pth)
+#   --output_dir    diretório de saída (default: results/sg_viz)
+```
+
+### Dependências entre fases
+
+```
+COYO data → generate_shards → train_aligner → eval_retrieval_sg
+                                                      │
+                               RelTR pré-treinado ───┘
+```
+
+---
+
+## Checkpoints
+
+| Arquivo | Produzido por | Usado em |
+|---|---|---|
+| `checkpoints/best_aligner.pth` | `train_aligner_with_h5.py` | `eval_retrieval_*.py`, `eval_retrieval_sg.py` |
+| `checkpoints/reltr/reltr_vg.pth` | download (pré-treinado) | `eval_retrieval_sg.py` |
 
 ---
 
@@ -71,9 +127,7 @@ RAW IMAGE (PIL)
 | Saída | Shape | Descrição |
 |---|---|---|
 | `cls_token` | `[1, 768]` | Descritor global da imagem |
-| `hr_features` | `[1, 768, H_hr, W_hr]` (anyup) | Features espaciais HR |
-
-Pipeline interno: DINOv3 → `[B, N_total, 768]` → extrai patches espaciais → reshape `[B, 768, h, w]` → upsample → pool `[B, 768, 32, 32]`.
+| `hr_features` | `[1, 768, H_hr, W_hr]` | Features espaciais HR |
 
 ---
 
@@ -86,8 +140,6 @@ Pipeline interno: DINOv3 → `[B, N_total, 768]` → extrai patches espaciais �
 
 **`embed_components(batch_texts)` → `[B, N_texts, 4096]`**
 
-Adiciona prefix de instrução a cada texto, tokeniza, forward, mean pooling sobre tokens, L2 normalize.
-
 ---
 
 ### LoRACrossAttentionAligner `models/aligners/lora_cross_attention.py`
@@ -99,12 +151,9 @@ Adiciona prefix de instrução a cada texto, tokeniza, forward, mean pooling sob
 | `rank` | 64 |
 | `num_heads` | 8 |
 
-**Forward:**
-
 ```
-Entradas:
-  hr_patches    [B, 1024, 768]   (grid 32×32 achatado)
-  text_queries  [B, 1, 4096]
+hr_patches    [B, 1024, 768]
+text_queries  [B, 1, 4096]
 
 Projeção visual com LoRA:
   base_v = visual_proj(hr_patches)              [B, 1024, 4096]
@@ -112,143 +161,30 @@ Projeção visual com LoRA:
   v_features = base_v + scaling * lora_v        [B, 1024, 4096]
 
 Cross-Attention (Q=text, K=V=visual):
-  attn_output, attn_weights = cross_attn(
-      query = text_queries,    [B, 1, 4096]
-      key   = v_features,      [B, 1024, 4096]
-      value = v_features       [B, 1024, 4096]
-  )
+  attn_output [B, 1, 4096]
 
-Saídas:
-  attn_output   [B, 1, 4096]
-  attn_weights  [B, 8, 1, 1024]
-  v_features    [B, 1024, 4096]
+Loss: contrastive_loss (InfoNCE, τ=0.05) + 0.05 * entropy_reg
 ```
-
-**Loss de treino:**
-```
-loss = contrastive_loss + 0.05 * entropy_reg
-       InfoNCE simétrico (τ=0.05)   (mean_entropy − 1.5)²
-```
-
-`loss_vg` é apenas monitoramento no TensorBoard — não participa do backward.
 
 ---
 
-### MdetrDetector `models/detectors/mdetr_detector.py`
+### RelTRWrapper `models/SG/reltr_wrapper.py`
 
-Detector open-vocabulary pré-treinado no Visual Genome. Não requer fine-tuning.
+Wrapper sobre o [RelTR](https://github.com/yrcong/RelTR) pré-treinado em VG-150. Recebe uma imagem PIL e retorna um `SceneGraph` com triplas `(sujeito, predicado, objeto)` e bounding boxes normalizados.
 
-| Parâmetro | Valor |
+| Parâmetro | Valor padrão |
 |---|---|
-| checkpoint | `ashkamath/mdetr-resnet-50` (HuggingFace Hub) |
-| `score_threshold` | 0.5 |
-| text query | `"person . sky . building . ..."` (150 classes VG-150) |
-
-**`detect(image)` → `list[Detection]`**
+| `num_queries` | 20 triplas por imagem |
+| `threshold` | 0.3 (score mínimo) |
+| Vocabulário | 150 entidades + 50 predicados VG-150 |
 
 ```python
-@dataclass
-class Detection:
-    bbox_xyxy:  Tensor   # [4] coordenadas em pixels
-    bbox_grid:  Tensor   # [4] coordenadas em grid (0..32)
-    label:      str
-    label_idx:  int
-    score:      float
-```
+from models.SG.reltr_wrapper import RelTRWrapper
 
-Pipeline: `pred_logits [Q, seq_len]` → sigmoid → max sobre tokens do texto → mapeamento token→classe via `offset_mapping` → filtro por score → cxcywh (norm) → xyxy (pixels) → escala grid.
-
----
-
-### AttributeHead `models/SG/attribute_head.py`
-
-Classificação multi-label de atributos sobre features alinhadas.
-
-| Parâmetro | Valor |
-|---|---|
-| `feat_dim` | 4096 |
-| `vocab_size` | 200 |
-| `hidden` | 1024 |
-
-```
-[M, 4096] → LayerNorm → Linear(4096→1024) → GELU → Dropout(0.1) → Linear(1024→200) → [M, 200]
-```
-
----
-
-### AttributeClassifier `models/SG/attribute_classifier.py`
-
-Orquestra predição de atributos sobre detecções usando o aligner congelado.
-
-```
-Entradas: detections + visual_grid [1, 32, 32, 768]
-
-  ROI mean-pool por bbox_grid  →  [M, 768]
-  aligner.visual_proj          →  [M, 4096]
-  AttributeHead                →  [M, 200] logits
-  sigmoid(threshold=0.3) + top-5
-
-Saída: Detection.attributes = [{"name": str, "score": float}, ...]
-```
-
----
-
-### RelationHead `models/SG/relation_head.py`
-
-Classificação de predicado para pares de objetos (direcional).
-
-| Parâmetro | Valor |
-|---|---|
-| `text_dim` | 4096 |
-| `vocab_size` | 50 |
-| `proj_dim` | 512 |
-| `hidden` | 1024 |
-| `use_ctx` | True |
-
-```
-Entradas: sub_feat [P, 4096], obj_feat [P, 4096], union_feat [P, 4096]
-
-  s = Linear(4096→512)(sub_feat)
-  o = Linear(4096→512)(obj_feat)
-  u = Linear(4096→512)(union_feat)
-
-  concat [s, o, s−o, u]  →  [P, 2048]
-  LayerNorm → Linear(2048→1024) → GELU → Dropout → Linear(1024→50)
-  →  [P, 50] logits
-```
-
-A diferença `s − o` garante assimetria: (A→B) ≠ (B→A).
-
----
-
-### RelationPredictor `models/SG/relation_predictor.py`
-
-Prediz relações entre todos os pares de objetos detectados.
-
-```
-N objetos → P = N(N-1) pares ordenados
-
-  ROI mean-pool: sub, obj, union  →  [P, 768] cada
-  aligner.visual_proj             →  [P, 4096] cada
-  RelationHead                    →  [P, 50] logits
-  softmax + top-1 por par
-
-Saída: [{"source": str, "target": str, "relation": str, "confidence": float}]
-```
-
----
-
-### KnowledgeGraphGenerator `models/SG/knowledge.py`
-
-Expande o scene graph com fatos taxonômicos via cache ou Qwen3 LLM.
-
-**Relações:** `is_a`, `part_of`, `made_of`, `used_for`, `has_property`
-
-```python
-{
-  "entities":      [str, ...],
-  "factual_edges": [{"sub": str, "rel": str, "obj": str}, ...]
-}
+reltr = RelTRWrapper(checkpoint="checkpoints/reltr/reltr_vg.pth")
+sg = reltr.predict(image)          # image: PIL.Image
+print(sg.triples[0])               # SceneGraphTriple(subject, predicate, object, ...)
+G = sg.to_networkx()               # nx.DiGraph
 ```
 
 ---
@@ -259,6 +195,17 @@ Expande o scene graph com fatos taxonômicos via cache ou Qwen3 LLM.
 |---|---|
 | `AnyUpModel` | PyTorch Hub `wimmerth/anyup` |
 | `JBUStack` | 4 estágios JBU progressivos (×2 cada = ×16 total) |
+
+---
+
+## Visualização
+
+`eval_retrieval_sg.py` gera uma figura por imagem recuperada com duas colunas:
+
+- **Esquerda**: imagem original com bounding boxes das entidades detectadas, coloridos por confiança (vermelho→verde)
+- **Direita**: dígrafo do scene graph com nós rotulados; entidades presentes na query são destacadas em laranja
+
+Saídas salvas em `results/sg_viz/<query>/rank01_<img>.png`.
 
 ---
 
@@ -274,56 +221,29 @@ SceneEmbed-Up/
 │   │   └── lora_cross_attention.py   # LoRACrossAttentionAligner
 │   ├── ups/
 │   │   └── hr_conversions.py         # AnyUpModel, JBUStack
-│   ├── detectors/
-│   │   └── mdetr_detector.py         # MdetrDetector (pré-treinado VG)
 │   └── SG/
-│       ├── attribute_head.py         # AttributeHead (200 classes)
-│       ├── attribute_classifier.py   # AttributeClassifier
-│       ├── relation_head.py          # RelationHead (50 predicados)
-│       ├── relation_predictor.py     # RelationPredictor
-│       └── knowledge.py             # KnowledgeGraphGenerator
+│       └── reltr_wrapper.py          # RelTRWrapper (pré-treinado, sem fine-tuning)
 ├── data/
 │   ├── data_utils_pytorch.py         # Datasets/DataLoaders COYO + shards H5
-│   └── vg_dataset.py                 # Visual Genome VG-150 (vocab, splits, datasets)
+│   ├── get_metadados_coyo.py
+│   ├── get_small_sample_coyo.py
+│   └── extract_files_coyo.py
 ├── embeddings/
-│   ├── generate_shards.py            # Exportação de embeddings COYO → H5
-│   └── generate_vg_attr_shards.py    # Exportação de features VG por objeto → H5
-├── train_aligner_with_h5.py          # Treino do Aligner (shards H5)
-├── train_aligner_with_Images.py      # Treino do Aligner (imagens direto)
-├── train_attribute_head.py           # Treino da AttributeHead (shards H5 VG)
-├── train_relation_head.py            # Treino da RelationHead (GT bboxes VG)
-├── eval_retrieval_with_h5.py         # Recall@K bidirecional (shards H5)
-├── eval_retrieval_with_images.py     # Recall@K bidirecional (imagens)
-└── eval_sg_vg.py                     # SGGen Recall@K / mR@K no VG
+│   └── generate_shards.py            # Embeddings COYO → H5
+├── viz/
+│   └── scene_graph_viz.py            # Visualização retrieval + scene graph
+├── utils/
+│   ├── checkpoint.py
+│   ├── early_stopping.py
+│   ├── io_utils.py
+│   ├── logging_utils.py
+│   └── metrics.py                    # salvar_recall_results
+├── train_aligner_with_h5.py          # Fase 1 — Aligner (shards H5)
+├── train_aligner_with_Images.py      # Fase 1 — Aligner (imagens direto)
+├── eval_retrieval_with_h5.py         # Avaliação Recall@K (shards H5)
+├── eval_retrieval_with_images.py     # Avaliação Recall@K (imagens)
+└── eval_retrieval_sg.py              # Retrieval + Scene Graph + Visualização
 ```
-
----
-
-## Treinamento
-
-### Ordem recomendada
-
-**1. Aligner** — treinado em COYO-700M com InfoNCE + entropy_reg:
-
-```bash
-python train_aligner_with_h5.py          # recomendado (shards pré-computados)
-python train_aligner_with_Images.py      # requer VRAM > 16 GB
-```
-
-**2. Extração de features VG** — DINO congelado, ROI-pool por objeto:
-
-```bash
-python embeddings/generate_vg_attr_shards.py   # obj_feats [N,768] + attr_labels [N,200]
-```
-
-**3. Heads VG-150** — Aligner congelado:
-
-```bash
-python train_attribute_head.py           # AttributeHead, loss: BCE multi-label
-python train_relation_head.py            # RelationHead, loss: CE multi-class
-```
-
-> O detector **MdetrDetector** não requer treino — usa checkpoint `ashkamath/mdetr-resnet-50` pré-treinado no Visual Genome diretamente do HuggingFace Hub.
 
 ---
 
@@ -332,7 +252,7 @@ python train_relation_head.py            # RelationHead, loss: CE multi-class
 | Dataset | Uso |
 |---|---|
 | COYO-700M (~15M imgs) | Treino do Aligner |
-| Visual Genome (VG-150) | Extração de features, AttributeHead, RelationHead |
+| Visual Genome (VG-150) | Pesos pré-treinados do RelTR (download direto) |
 
 **Shards H5 — Aligner (COYO):**
 
@@ -344,24 +264,14 @@ python train_relation_head.py            # RelationHead, loss: CE multi-class
 
 ~7 GB por shard de 5k amostras (gzip).
 
-**Shards H5 — AttributeHead (VG):**
-
-| Campo | Shape | Dtype |
-|---|---|---|
-| `obj_feats` | `[N, 768]` | float16 |
-| `attr_labels` | `[N, 200]` | float16 |
-
-~400–600 MB total (todos os objetos VG-150 anotados com atributos).
-
 ---
 
 ## Métricas
 
 | Tipo | Métrica | Descrição |
 |---|---|---|
-| Retrieval | `I2T/T2I Recall@K` | Top-K bidirecional |
-| SGG | `R@20/50/100` | Recall sobre tripletas (sub, pred, obj) |
-| SGG | `mR@20/50/100` | Mean Recall por classe de predicado |
+| Retrieval | `I2T/T2I Recall@K` | Top-K bidirecional image↔text |
+| Retrieval | `Mean Recall@K` | Média I2T + T2I |
 
 ---
 
@@ -370,7 +280,9 @@ python train_relation_head.py            # RelationHead, loss: CE multi-class
 - Python 3.10+, PyTorch (CUDA 12.1), bfloat16
 - HuggingFace Transformers
 - H5PY (shards de embeddings)
-- NetworkX (grafos), TensorBoard (logging)
+- NetworkX + Matplotlib (visualização de grafos)
+- TensorBoard (logging de treino)
+- RelTR (repositório externo em `reltr_repo/`)
 
 ---
 
@@ -378,10 +290,8 @@ python train_relation_head.py            # RelationHead, loss: CE multi-class
 
 - [DINOv3](https://github.com/facebookresearch/dinov3) — Meta AI
 - [Qwen3-Embedding-8B](https://huggingface.co/Qwen/Qwen3-Embedding-8B) — Alibaba Cloud
-- [MDETR](https://github.com/ashkamath/mdetr) — Kamath et al., ICCV 2021
+- [RelTR](https://github.com/yrcong/RelTR) — Cong et al., TPAMI 2023
 - [AnyUp](https://github.com/wimmerth/anyup) — Wimmer et al.
 - [FeatUp](https://github.com/mhamilton723/FeatUp) — Hamilton et al.
 - [COYO-700M](https://github.com/kakaobrain/coyo-dataset) — Kakao Brain
 - [Visual Genome](https://homes.cs.washington.edu/~ranjay/visualgenome/) — Krishna et al.
-- Xu et al., *Scene Graph Generation by Iterative Message Passing*, CVPR 2017
-- Tang et al., *Unbiased Scene Graph Generation from Biased Training*, CVPR 2020

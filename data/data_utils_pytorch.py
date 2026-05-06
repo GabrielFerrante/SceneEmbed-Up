@@ -325,6 +325,7 @@ class ShardedH5AttributeDataset_withSSD(torch.utils.data.Dataset):
     Espera shards com keys:
       obj_feats   : [N, 768]      features DINO pos-ROI-pool por objeto
       attr_labels : [N, n_attrs]  multi-hot bfloat16
+    E obj_class_idx.npy no mesmo diretorio.
     """
 
     def __init__(self, folder_path: str):
@@ -346,6 +347,13 @@ class ShardedH5AttributeDataset_withSSD(torch.utils.data.Dataset):
         if not self._index:
             raise RuntimeError("Nenhuma amostra valida nos shards.")
 
+        class_idx_path = os.path.join(folder_path, "obj_class_idx.npy")
+        self._class_idx = np.load(class_idx_path)
+        assert len(self._class_idx) == len(self._index), (
+            f"obj_class_idx.npy tem {len(self._class_idx)} entradas mas "
+            f"os shards tem {len(self._index)} objetos"
+        )
+
         self._handles: dict[str, h5py.File] = {}
         print(f"[ShardedH5AttributeDataset_withSSD] {len(self._index):,} objetos em {len(shard_files)} shards")
 
@@ -357,12 +365,13 @@ class ShardedH5AttributeDataset_withSSD(torch.utils.data.Dataset):
     def __len__(self) -> int:
         return len(self._index)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         path, local_idx = self._index[idx]
         f = self._get_handle(path)
-        feats  = torch.from_numpy(f["obj_feats"][local_idx].copy())    # [768]
-        labels = torch.from_numpy(f["attr_labels"][local_idx].copy())  # [n_attrs]
-        return feats, labels
+        feats     = torch.from_numpy(f["obj_feats"][local_idx].copy())    # [768]
+        labels    = torch.from_numpy(f["attr_labels"][local_idx].copy())  # [n_attrs]
+        class_idx = torch.tensor(int(self._class_idx[idx]), dtype=torch.long)
+        return feats, labels, class_idx
 
     def __del__(self):
         for f in self._handles.values():
@@ -377,6 +386,7 @@ class ShardedH5AttributeDataset_withHD(Dataset):
     Espera shards com keys:
       obj_feats   : [N, 768]      features DINO pos-ROI-pool por objeto
       attr_labels : [N, n_attrs]  multi-hot bfloat16
+    E obj_class_idx.npy no mesmo diretorio.
 
     Uso: igual ao ShardedH5Dataset_withHD — chame rotate_buffer() ao fim
     de cada época ou de cada shard iteration.
@@ -392,10 +402,24 @@ class ShardedH5AttributeDataset_withHD(Dataset):
         self.shuffle_shards   = shuffle_shards
         self._shard_queue: list[str] = []
 
-        self._feats:  torch.Tensor | None = None
-        self._labels: torch.Tensor | None = None
-        self._next_feats:  torch.Tensor | None = None
-        self._next_labels: torch.Tensor | None = None
+        # Mapa shard → (offset_inicio, offset_fim) no array global de class_idx
+        self._shard_offsets: dict[str, tuple[int, int]] = {}
+        offset = 0
+        for path in self._all_shards:
+            with h5py.File(path, "r") as f:
+                n = f["obj_feats"].shape[0]
+            self._shard_offsets[path] = (offset, offset + n)
+            offset += n
+
+        class_idx_path = os.path.join(folder_path, "obj_class_idx.npy")
+        self._all_class_idx: np.ndarray = np.load(class_idx_path)
+
+        self._feats:      torch.Tensor | None = None
+        self._labels:     torch.Tensor | None = None
+        self._class_idx:  torch.Tensor | None = None
+        self._next_feats:     torch.Tensor | None = None
+        self._next_labels:    torch.Tensor | None = None
+        self._next_class_idx: torch.Tensor | None = None
         self._prefetch_thread: threading.Thread | None = None
 
         self._reset_queue()
@@ -407,18 +431,26 @@ class ShardedH5AttributeDataset_withHD(Dataset):
         if self.shuffle_shards:
             random.shuffle(self._shard_queue)
 
-    def _load_shards(self, paths: list[str]) -> tuple[torch.Tensor, torch.Tensor]:
-        feats_list, labels_list = [], []
+    def _load_shards(self, paths: list[str]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        feats_list, labels_list, class_idx_list = [], [], []
         for path in tqdm(paths, desc="  Carregando shards attr", leave=False):
             try:
                 with h5py.File(path, "r") as f:
                     feats_list.append(torch.from_numpy(f["obj_feats"][:]))
                     labels_list.append(torch.from_numpy(f["attr_labels"][:]))
+                start, end = self._shard_offsets[path]
+                class_idx_list.append(
+                    torch.from_numpy(self._all_class_idx[start:end].astype(np.int64))
+                )
             except Exception as e:
                 print(f"[WARN] Shard ignorado: {path} — {e}")
         if not feats_list:
             raise RuntimeError("Nenhum shard valido carregado.")
-        return torch.cat(feats_list, dim=0), torch.cat(labels_list, dim=0)
+        return (
+            torch.cat(feats_list,     dim=0),
+            torch.cat(labels_list,    dim=0),
+            torch.cat(class_idx_list, dim=0),
+        )
 
     def _load_next_buffer_sync(self) -> None:
         if not self._shard_queue:
@@ -426,7 +458,7 @@ class ShardedH5AttributeDataset_withHD(Dataset):
         batch = self._shard_queue[:self.shards_in_memory]
         self._shard_queue = self._shard_queue[self.shards_in_memory:]
         print(f"\n[Buffer] Carregando {len(batch)} shards attr em memoria...")
-        self._feats, self._labels = self._load_shards(batch)
+        self._feats, self._labels, self._class_idx = self._load_shards(batch)
         print(f"[Buffer] {len(self._feats):,} objetos disponiveis.")
 
     def _start_prefetch(self) -> None:
@@ -435,7 +467,7 @@ class ShardedH5AttributeDataset_withHD(Dataset):
         batch = self._shard_queue[:self.shards_in_memory]
 
         def _worker():
-            self._next_feats, self._next_labels = self._load_shards(batch)
+            self._next_feats, self._next_labels, self._next_class_idx = self._load_shards(batch)
 
         self._prefetch_thread = threading.Thread(target=_worker, daemon=True)
         self._prefetch_thread.start()
@@ -446,10 +478,12 @@ class ShardedH5AttributeDataset_withHD(Dataset):
             self._prefetch_thread = None
         if self._next_feats is not None:
             self._shard_queue = self._shard_queue[self.shards_in_memory:]
-            self._feats  = self._next_feats
-            self._labels = self._next_labels
-            self._next_feats  = None
-            self._next_labels = None
+            self._feats      = self._next_feats
+            self._labels     = self._next_labels
+            self._class_idx  = self._next_class_idx
+            self._next_feats     = None
+            self._next_labels    = None
+            self._next_class_idx = None
             print(f"\n[Buffer] Rotacionado — {len(self._feats):,} objetos em memoria.")
         else:
             self._load_next_buffer_sync()
@@ -458,8 +492,8 @@ class ShardedH5AttributeDataset_withHD(Dataset):
     def __len__(self) -> int:
         return len(self._feats)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        return self._feats[idx], self._labels[idx]
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return self._feats[idx], self._labels[idx], self._class_idx[idx]
 
 
 def create_all_dataloaders( #USAR SE TIVER MEMÓRIA VRAM O SUFICIENTE

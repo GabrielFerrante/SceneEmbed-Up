@@ -19,7 +19,7 @@ from tqdm import tqdm
 from data.data_utils_pytorch import ShardedH5Dataset_withSSD
 from models.aligners.lora_cross_attention import LoRACrossAttentionAligner
 from torch.utils.data import DataLoader
-from utils.metrics_scene_graph import salvar_recall_results
+from utils.metrics import salvar_recall_results
 
 
 # ---------------------------------------------------------------------------

@@ -6,7 +6,7 @@ from models.encoders.dinov3_extrator import DinoSceneEncoder
 from models.encoders.qwen3_extrator import QwenSceneEmbedder
 from data.data_utils_pytorch import create_all_dataloaders
 import os
-from utils.metrics_scene_graph import salvar_recall_results
+from utils.metrics import salvar_recall_results
 
 
 class RetrievalEvaluator:

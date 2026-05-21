@@ -3,8 +3,6 @@ eval_with_h5.py
 ---------------
 Avaliacao de retrieval (Recall@K bidirecional) do LoRACrossAttentionAligner
 sobre shards HDF5 pre-computados.
-
-SGGen/KG: veja eval_sg_vg.py (benchmark Visual Genome VG-150).
 """
 
 from __future__ import annotations
@@ -291,7 +289,8 @@ if __name__ == "__main__":
 
     aligner = LoRACrossAttentionAligner(visual_dim=768, text_dim=4096, rank=64)
 
-    weights_path = "checkpoints/best_aligner.pth"
+    weights_path = "checkpoints/best_aligner_no_up.pth"
+    "weights_path = checkpoints/best_aligner.pth"
     if os.path.exists(weights_path):
         aligner.load_state_dict(
             torch.load(weights_path, map_location=device),
@@ -303,7 +302,7 @@ if __name__ == "__main__":
 
     aligner.to(device).to(torch.bfloat16).eval()
 
-    test_h5_ds = ShardedH5Dataset_withSSD("G:/coyo/embeds/test_anyup/")
+    test_h5_ds = ShardedH5Dataset_withSSD("E:/COYO/embeds/test_noup") #ESSE SEM UP
     test_h5_loader = DataLoader(
         test_h5_ds, batch_size=128, shuffle=False,
         pin_memory=True, num_workers=4, prefetch_factor=4, persistent_workers=True,

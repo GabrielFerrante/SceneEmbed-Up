@@ -544,7 +544,7 @@ def create_all_dataloaders( #USAR SE TIVER MEMÓRIA VRAM O SUFICIENTE
     if t == "all":
         train_loader = DataLoader(
         train_dataset, batch_size=batch_size, shuffle=True, 
-        num_workers=num_workers, collate_fn=collate_fn, pin_memory=True
+        num_workers=num_workers, collate_fn=collate_fn, pin_memory=True, generator=generator
         )
     
         val_loader = DataLoader(

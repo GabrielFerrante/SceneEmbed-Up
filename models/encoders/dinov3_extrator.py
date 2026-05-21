@@ -35,16 +35,41 @@ class DinoSceneEncoder:
         self.adapterFeat = None
         
         if self.upsampler == "anyup":
-       
             self.upsampler =  AnyUpModel()
-            
+
         elif self.upsampler == "featup":
             self.upsampler =  load_featup_stack("C:/Repositorios/SceneEmbed-Up/models/encoders/vit_jbu_stack_cocostuff.ckpt", feat_dim=384)
             self.adapterFeat = nn.Conv2d(768, 384, kernel_size=1).to(self.device)
-            
+
+        elif self.upsampler in (None, "none"):
+            self.upsampler = None
+
         self.model.eval()
         
 
+
+    @torch.no_grad()
+    def extract_patches_seq(self, img_tensor):
+        """
+        Retorna patches LR como sequência, sem detour por grid 2D.
+
+        Returns
+        -------
+        cls_token: [B, 768]
+        patches  : [B, N, 768]   — N = (H/16) * (W/16). Para img 256: N=256.
+        """
+        inputs = self.processor(images=img_tensor, return_tensors="pt").to(self.device)
+        outputs = self.model(**inputs)
+
+        last_hidden_state = outputs.last_hidden_state
+        cls_token = last_hidden_state[:, 0, :]
+
+        h_feat = inputs['pixel_values'].shape[-2] // 16
+        w_feat = inputs['pixel_values'].shape[-1] // 16
+        n_spatial = h_feat * w_feat
+
+        patches = last_hidden_state[:, 1:n_spatial+1, :]  # [B, N, 768]
+        return cls_token, patches
 
     @torch.no_grad()
     def extract_features(self, img_tensor):
@@ -73,7 +98,11 @@ class DinoSceneEncoder:
             hr_features = self.upsampler.up(img_tensor, lr_features)
         elif self.model_up == "featup":
             hr_features = self.upsampler(self.adapterFeat(lr_features), img_tensor)
-                    
+        elif self.model_up in (None, "none"):
+            # Sem upsampling — retorna patches LR diretos do DINO
+            # Para img 256×256 e patch 16: lr_features [B, 768, 16, 16]
+            hr_features = lr_features
+
         return cls_token,  hr_features
 
 # Exemplo de uso:

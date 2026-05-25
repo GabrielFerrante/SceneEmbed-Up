@@ -156,7 +156,7 @@ def train_lora_projection(epochs: int = 10, batch_size: int = 2) -> None:
         aligner.eval()
         val_loss, val_acc, val_samples = 0.0, 0.0, 0
 
-        print(f"Iniciando Validação Época {epoch+1}...")
+        print(f"Starting Validation Epoch {epoch+1}...")
         with torch.no_grad():
             for images, texts, _ in tqdm(val_dataloader, desc="Validating"):
 
@@ -192,7 +192,7 @@ def train_lora_projection(epochs: int = 10, batch_size: int = 2) -> None:
 
                 except RuntimeError as e:
                     if "CUDA" in str(e).upper() and torch.cuda.is_available():
-                        print(f"Erro de GPU durante a validação: {e}")
+                        print(f"GPU error during validation: {e}")
                         print(torch.cuda.memory_summary())
                     raise
 
@@ -239,7 +239,7 @@ if __name__ == "__main__":
         train_lora_projection(epochs=EPOCHS, batch_size=BATCH_SIZE)
     except RuntimeError as e:
         if "CUDA" in str(e).upper() and torch.cuda.is_available():
-            print("Erro crítico de GPU.")
+            print("Critical GPU error.")
             print(torch.cuda.memory_summary())
         raise
     except Exception as e:

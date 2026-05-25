@@ -246,11 +246,11 @@ def _plot_results(splits: List[Dict], out_path: str) -> None:
     """
     n_splits = len([s for s in splits if s["n_shards"] > 0])
     if n_splits == 0:
-        print("[WARN] Nenhum split válido para plotar.")
+        print("[WARN] No valid splits to plot.")
         return
 
     fig, axes = plt.subplots(2, max(n_splits, 2), figsize=(7 * max(n_splits, 2), 12))
-    fig.suptitle("COYO Shards — Análise de Estrutura", fontsize=15, fontweight="bold")
+    fig.suptitle("COYO Shards — Structure Analysis", fontsize=15, fontweight="bold")
 
     col = 0
     for split in splits:
@@ -263,19 +263,19 @@ def _plot_results(splits: List[Dict], out_path: str) -> None:
         counts = [s.get("n_samples", 0) for s in shards]
         axes[0, col].hist(counts, bins=min(30, len(counts)), color="#3498db",
                           edgecolor="white", linewidth=0.4)
-        axes[0, col].set_title(f"[{split['split']}] Amostras por Shard\n"
+        axes[0, col].set_title(f"[{split['split']}] Samples per Shard\n"
                                f"Total: {split['n_samples']:,} | {split['n_shards']} shards")
-        axes[0, col].set_xlabel("Nº de amostras")
-        axes[0, col].set_ylabel("Contagem de shards")
+        axes[0, col].set_xlabel("Number of samples")
+        axes[0, col].set_ylabel("Shard count")
 
         # Linha vertical na mediana
         if counts:
             axes[0, col].axvline(np.median(counts), color="red", linestyle="--",
-                                 linewidth=1.2, label=f"Mediana: {int(np.median(counts))}")
+                                 linewidth=1.2, label=f"Median: {int(np.median(counts))}")
             axes[0, col].legend(fontsize=8)
 
         # ── Linha 2: Qualidade dos shards ────────────────────────────────────
-        quality_labels = ["OK", "Corrompidos", "NaN visual", "Inf visual", "Zeros >5%"]
+        quality_labels = ["OK", "Corrupted", "Visual NaN", "Visual Inf", "Zeros >5%"]
         quality_vals = [
             split["n_shards"] - split["n_corrupt"],
             split["n_corrupt"],
@@ -291,8 +291,8 @@ def _plot_results(splits: List[Dict], out_path: str) -> None:
                 axes[1, col].text(bar.get_x() + bar.get_width() / 2,
                                   bar.get_height() + 0.1,
                                   str(val), ha="center", fontsize=9)
-        axes[1, col].set_title(f"[{split['split']}] Qualidade dos Shards")
-        axes[1, col].set_ylabel("Nº de shards")
+        axes[1, col].set_title(f"[{split['split']}] Shard Quality")
+        axes[1, col].set_ylabel("Number of shards")
         axes[1, col].tick_params(axis="x", rotation=20, labelsize=8)
 
         col += 1
@@ -306,7 +306,7 @@ def _plot_results(splits: List[Dict], out_path: str) -> None:
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     plt.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close()
-    print(f"Gráfico salvo em: {out_path}")
+    print(f"Chart saved to: {out_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -323,36 +323,36 @@ def _print_report(splits: List[Dict]) -> None:
         Lista de resultados por split.
     """
     print("\n" + "=" * 65)
-    print("RELATÓRIO DE SHARDS H5")
+    print("H5 SHARDS REPORT")
     print("=" * 65)
 
     total_samples = 0
     for s in splits:
         print(f"\n  Split [{s['split'].upper()}]  ← {s['dir']}")
         if s["n_shards"] == 0:
-            print(f"    ⚠  Nenhum shard encontrado!")
+            print(f"    ⚠  No shards found!")
             continue
         print(f"    Shards           : {s['n_shards']:>8}")
-        print(f"    Amostras totais  : {s['n_samples']:>8,}")
-        print(f"    Corrompidos      : {s['n_corrupt']:>8}"
+        print(f"    Total samples    : {s['n_samples']:>8,}")
+        print(f"    Corrupted        : {s['n_corrupt']:>8}"
               f"  ({100*s['corrupt_rate']:.1f}%)")
-        print(f"    NaN visual       : {s['n_nan_visual']:>8}")
-        print(f"    Inf visual       : {s['n_inf_visual']:>8}")
+        print(f"    Visual NaN       : {s['n_nan_visual']:>8}")
+        print(f"    Visual Inf       : {s['n_inf_visual']:>8}")
         print(f"    Zeros >5%        : {s['n_high_zero_ratio']:>8}")
         if s["dominant_visual_shape"]:
-            print(f"    Shape visual     : {s['dominant_visual_shape']}")
+            print(f"    Visual shape     : {s['dominant_visual_shape']}")
         if s["dominant_text_shape"]:
-            print(f"    Shape texto      : {s['dominant_text_shape']}")
+            print(f"    Text shape       : {s['dominant_text_shape']}")
         sp = s["samples_per_shard"]
-        print(f"    Amostras/shard   : {sp['mean']:.0f} ± {sp['std']:.0f}"
+        print(f"    Samples/shard    : {sp['mean']:.0f} ± {sp['std']:.0f}"
               f"  (min {sp['min']}, max {sp['max']})")
         sz = s["size_mb_per_shard"]
-        print(f"    Tamanho total    : {sz['total']:.1f} MB  "
+        print(f"    Total size       : {sz['total']:.1f} MB  "
               f"({sz['mean']:.1f} MB/shard)")
 
         total_samples += s["n_samples"]
 
-    print(f"\n  TOTAL DE AMOSTRAS (todos os splits): {total_samples:,}")
+    print(f"\n  TOTAL SAMPLES (all splits): {total_samples:,}")
     print("=" * 65)
 
 
@@ -401,7 +401,7 @@ def analyze(
     json_path = os.path.join(output_dir, "dataset_analysis_shards.json")
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(output, f, indent=4, ensure_ascii=False)
-    print(f"\nJSON salvo em: {json_path}")
+    print(f"\nJSON saved to: {json_path}")
 
     png_path = os.path.join(output_dir, "dataset_analysis_shards.png")
     valid_splits = [s for s in splits if s["n_shards"] > 0]

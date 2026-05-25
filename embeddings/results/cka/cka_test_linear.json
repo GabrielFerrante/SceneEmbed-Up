@@ -1,0 +1,12 @@
+{
+  "split": "test",
+  "kernel": "linear",
+  "n_samples": 5000,
+  "folder_anyup": "G:/coyo/embeds/test_anyup/",
+  "folder_noup": "E:/COYO/embeds/test_noup/",
+  "cka": {
+    "visual_anyup <-> text": 0.05109148568271899,
+    "visual_noup  <-> text": 0.014266160020402874,
+    "visual_anyup <-> visual_noup": 0.01207796504065139
+  }
+}

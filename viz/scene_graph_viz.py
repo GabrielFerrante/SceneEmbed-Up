@@ -121,7 +121,7 @@ def draw_scene_graph(
     G = sg.to_networkx()
 
     if G.number_of_nodes() == 0:
-        ax.text(0.5, 0.5, "Sem triplas detectadas", ha="center", va="center", transform=ax.transAxes)
+        ax.text(0.5, 0.5, "No triples detected", ha="center", va="center", transform=ax.transAxes)
         ax.axis("off")
         return
 
@@ -183,7 +183,7 @@ def visualize_retrieval_result(
     draw_scene_graph(sg, ax_graph, highlight_nodes=highlight_nodes)
 
     ax_graph.set_title(
-        f"{len(sg.triples)} triplas detectadas",
+        f"{len(sg.triples)} triples detected",
         fontsize=9, color="white", pad=4,
     )
 
@@ -191,7 +191,7 @@ def visualize_retrieval_result(
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     plt.savefig(save_path, dpi=120, bbox_inches="tight", facecolor=fig.get_facecolor())
     plt.close(fig)
-    print(f"[viz] Salvo em {save_path}")
+    print(f"[viz] Saved to {save_path}")
 
 
 def visualize_rerank_result(
@@ -237,7 +237,7 @@ def visualize_rerank_result(
         highlight.add(triple.subject)
         highlight.add(triple.object)
     draw_scene_graph(result.sg, ax_graph, highlight_nodes=list(highlight))
-    ax_graph.set_title(f"{len(result.sg.triples)} triplas", fontsize=9, color="white", pad=4)
+    ax_graph.set_title(f"{len(result.sg.triples)} triples", fontsize=9, color="white", pad=4)
 
     # painel de explicabilidade
     ax_text.axis("off")
@@ -253,7 +253,7 @@ def visualize_rerank_result(
         f"score_final   = {result.score_final:.4f}",
         f"(alpha = {alpha:.2f})",
         "",
-        "Top triplas alinhadas com a query:",
+        "Top triples aligned with query:",
     ]
     for i, (triple, sim) in enumerate(result.top_triples, 1):
         lines.append(f"  {i}. {triple.subject} -[{triple.predicate}]-> {triple.object}")
@@ -270,4 +270,4 @@ def visualize_rerank_result(
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     plt.savefig(save_path, dpi=120, bbox_inches="tight", facecolor=fig.get_facecolor())
     plt.close(fig)
-    print(f"[viz] Salvo em {save_path}")
+    print(f"[viz] Saved to {save_path}")

@@ -141,7 +141,7 @@ def _build_html_report(output_dir: str) -> str:
     with open(report_path, "w", encoding="utf-8") as f:
         f.write(html)
 
-    print(f"\nRelatório HTML salvo em: {report_path}")
+    print(f"\nHTML report saved to: {report_path}")
     return report_path
 
 
@@ -186,7 +186,7 @@ def run_all(
 
     if not skip_images:
         print("\n" + "─" * 55)
-        print("1/3 Análise de Imagens e Captions")
+        print("1/3 Image and Caption Analysis")
         print("─" * 55)
         _img_mod.analyze(
             root_dir=root_images,
@@ -197,7 +197,7 @@ def run_all(
 
     if not skip_embeds:
         print("\n" + "─" * 55)
-        print("2/3 Análise de Embeddings H5")
+        print("2/3 H5 Embeddings Analysis")
         print("─" * 55)
         _emb_mod.analyze(
             shard_dir=shard_val,
@@ -209,7 +209,7 @@ def run_all(
 
     if not skip_shards:
         print("\n" + "─" * 55)
-        print("3/3 Análise de Estrutura dos Shards")
+        print("3/3 Shard Structure Analysis")
         print("─" * 55)
         _shard_mod.analyze(
             train_dir=train_dir or None,
@@ -219,16 +219,16 @@ def run_all(
         )
 
     print("\n" + "─" * 55)
-    print("Gerando relatório HTML consolidado...")
+    print("Generating consolidated HTML report...")
     _build_html_report(output_dir)
     print("─" * 55)
-    print("✓ Análise completa!")
+    print("✓ Analysis complete!")
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Orquestra análise completa do COYO.")
     parser.add_argument("--root_images",   default="F:/COYO/coyo/extracted")
-    parser.add_argument("--max_images",    type=int, default=20_000)
+    parser.add_argument("--max_images",    type=int, default=0)
     parser.add_argument("--shard_val",     default="G:/coyo/embeds/val_anyup")
     parser.add_argument("--max_embeds",    type=int, default=5_000)
     parser.add_argument("--train_dir",     default="F:/COYO/embeds/train_anyup")

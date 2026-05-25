@@ -153,7 +153,7 @@ def _validate_shard(path: str, expected_n: Optional[int] = None) -> None:
         print(f"  [OK] {os.path.basename(path)} — {n} amostras, shape visual={v_shape}")
 
     except Exception as e:
-        print(f"  [WARN] Falha na validação de {path}: {e}")
+        print(f"  [WARN] Validation failed for {path}: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -396,17 +396,17 @@ def export_embeddings_sharded(
                     writer.write_batch(v_np, t_np, g_np)
 
                 except KeyboardInterrupt:
-                    print(f"\nInterrupção! Total exportado: {writer.total_written:,}. "
-                          "Seguro fechar.")
+                    print(f"\nInterrupted! Total exported: {writer.total_written:,}. "
+                          "Safe to close.")
                     return
 
                 except RuntimeError as e:
                     if "CUDA" in str(e).upper() and torch.cuda.is_available():
-                        print(f"Erro de GPU: {e}")
+                        print(f"GPU error: {e}")
                         print(torch.cuda.memory_summary())
                     raise
 
-    print(f"\nExportação concluída — {writer.total_written:,} amostras em {output_dir}")
+    print(f"\nExport complete — {writer.total_written:,} samples in {output_dir}")
 
 
 # ---------------------------------------------------------------------------

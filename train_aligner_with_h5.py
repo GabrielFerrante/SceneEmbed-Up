@@ -195,7 +195,7 @@ if __name__ == "__main__":
     EPOCHS = 20 
     BATCH_SIZE = 64 
    
-    print("--- Iniciando Pipeline de Treinamento da camada de projeção ---")
+    print("--- Starting Projection Layer Training Pipeline ---")
 
     torch.cuda.empty_cache()
     print(f"VRAM livre antes do treino: "
@@ -208,7 +208,7 @@ if __name__ == "__main__":
         )
     except RuntimeError as e:
         if "CUDA" in str(e).upper() and torch.cuda.is_available():
-            print("Erro crítico de GPU no loop principal.")
+            print("Critical GPU error in main loop.")
             print(torch.cuda.memory_summary())
         raise
     except Exception as e:

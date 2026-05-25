@@ -92,7 +92,7 @@ class CoyoExtractedDataset(Dataset):
             self.image_paths.extend(glob.glob(os.path.join(root_dir, "**", f"*{ext}"), recursive=True))
             
         
-        print(f"Dataset carregado! Total de imagens encontradas: {len(self.image_paths)}")
+        print(f"Dataset loaded! Total images found: {len(self.image_paths)}")
 
     def __len__(self):
         return len(self.image_paths)
@@ -152,7 +152,7 @@ class ShardedH5Dataset_withSSD(torch.utils.data.Dataset):
                 for local_idx in range(n):
                     self._index.append((path, local_idx))
             except Exception as e:
-                print(f"[WARN] Shard ignorado: {path} — {e}")
+                print(f"[WARN] Shard skipped: {path} — {e}")
 
         if not self._index:
             raise RuntimeError("Nenhuma amostra válida encontrada nos shards.")
@@ -249,7 +249,7 @@ class ShardedH5Dataset_withHD(Dataset):
                     visuals.append(torch.from_numpy(f["visual_feats"][:]))
                     texts.append(torch.from_numpy(f["text_feats"][:]))
             except Exception as e:
-                print(f"[WARN] Shard ignorado: {path} — {e}")
+                print(f"[WARN] Shard skipped: {path} — {e}")
 
         if not visuals:
             raise RuntimeError("Nenhum shard válido carregado no buffer.")
@@ -264,9 +264,9 @@ class ShardedH5Dataset_withHD(Dataset):
         batch = self._shard_queue[:self.shards_in_memory]
         self._shard_queue = self._shard_queue[self.shards_in_memory:]
 
-        print(f"\n[Buffer] Carregando {len(batch)} Next's shards em memória...")
+        print(f"\n[Buffer] Loading {len(batch)} next shards into memory...")
         self._visual, self._text = self._load_shards(batch)
-        print(f"[Buffer] {len(self._visual):,} amostras disponíveis.")
+        print(f"[Buffer] {len(self._visual):,} samples available.")
 
     def _start_prefetch(self) -> None:
         """Dispara thread de background para pré-carregar o próximo buffer."""
@@ -300,7 +300,7 @@ class ShardedH5Dataset_withHD(Dataset):
             self._text   = self._next_text
             self._next_visual = None
             self._next_text   = None
-            print(f"\n[Buffer] Rotacionado — {len(self._visual):,} amostras em memória.")
+            print(f"\n[Buffer] Rotated — {len(self._visual):,} samples in memory.")
         else:
             # Prefetch não tinha dados (fim de fila): recarrega do zero
             self._load_next_buffer_sync()
@@ -342,7 +342,7 @@ class ShardedH5AttributeDataset_withSSD(torch.utils.data.Dataset):
                 for i in range(n):
                     self._index.append((path, i))
             except Exception as e:
-                print(f"[WARN] Shard ignorado: {path} — {e}")
+                print(f"[WARN] Shard skipped: {path} — {e}")
 
         if not self._index:
             raise RuntimeError("Nenhuma amostra valida nos shards.")
@@ -443,7 +443,7 @@ class ShardedH5AttributeDataset_withHD(Dataset):
                     torch.from_numpy(self._all_class_idx[start:end].astype(np.int64))
                 )
             except Exception as e:
-                print(f"[WARN] Shard ignorado: {path} — {e}")
+                print(f"[WARN] Shard skipped: {path} — {e}")
         if not feats_list:
             raise RuntimeError("Nenhum shard valido carregado.")
         return (
@@ -534,10 +534,10 @@ def create_all_dataloaders( #USAR SE TIVER MEMÓRIA VRAM O SUFICIENTE
         generator=generator
     )
     
-    print(f"Divisão concluída:")
-    print(f"  Treino: {len(train_dataset)} imagens")
-    print(f"  Validação: {len(val_dataset)} imagens")
-    print(f"  Teste: {len(test_dataset)} imagens")
+    print(f"Split complete:")
+    print(f"  Train: {len(train_dataset)} images")
+    print(f"  Validation: {len(val_dataset)} images")
+    print(f"  Test: {len(test_dataset)} images")
     
     
     
@@ -630,9 +630,9 @@ if __name__ == "__main__":
         print("="*30)
 
     except FileNotFoundError as e:
-        print(f"\n[ERRO] Caminho não encontrado: {e}")
+        print(f"\n[ERROR] Path not found: {e}")
     except Exception as e:
-        print(f"\n[ERRO] Ocorreu um erro inesperado: {e}")
+        print(f"\n[ERROR] Unexpected error: {e}")
         import traceback
         traceback.print_exc()
         

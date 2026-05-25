@@ -166,8 +166,8 @@ def _cosine_similarity_diag(
     Retorna None se A e B tiverem dimensões incompatíveis.
     """
     if A.shape[1] != B.shape[1]:
-        print(f"  [INFO] Dimensões incompatíveis ({A.shape[1]} vs {B.shape[1]}) — "
-              "similaridade cross-modal requer o Aligner. Pulando.")
+        print(f"  [INFO] Incompatible dimensions ({A.shape[1]} vs {B.shape[1]}) — "
+              "cross-modal similarity requires the Aligner. Skipping.")
         return None
 
     N = A.shape[0]
@@ -332,7 +332,7 @@ def _plot_results(
     """
     n_rows = 3 if G is not None else 2
     fig, axes = plt.subplots(n_rows, 4, figsize=(22, 6 * n_rows))
-    fig.suptitle("COYO Embeddings — Análise de Distribuição", fontsize=15, fontweight="bold")
+    fig.suptitle("COYO Embeddings — Distribution Analysis", fontsize=15, fontweight="bold")
 
     V_flat = V.reshape(len(V), -1)     # [N, P*D]
     T_flat = T.reshape(len(T), -1)     # [N, T*D]
@@ -343,18 +343,18 @@ def _plot_results(
     t_norms       = _compute_norms(T.squeeze(1), axis=-1)      # [N]
 
     axes[0, 0].hist(v_patch_norms, bins=60, color="#3498db", edgecolor="white", linewidth=0.3)
-    axes[0, 0].set_title("Norma L2 — Visual (média patches/img)")
-    axes[0, 0].set_xlabel("Norma L2")
+    axes[0, 0].set_title("L2 Norm — Visual (avg patches/img)")
+    axes[0, 0].set_xlabel("L2 Norm")
 
     axes[0, 1].hist(t_norms, bins=60, color="#e74c3c", edgecolor="white", linewidth=0.3)
-    axes[0, 1].set_title("Norma L2 — Texto")
-    axes[0, 1].set_xlabel("Norma L2")
+    axes[0, 1].set_title("L2 Norm — Text")
+    axes[0, 1].set_xlabel("L2 Norm")
 
     # ── Variância intra-imagem ───────────────────────────────────────────────
     intra_var = _intra_image_variance(V, n_sample=min(1000, len(V)))
     axes[0, 2].hist(intra_var, bins=60, color="#9b59b6", edgecolor="white", linewidth=0.3)
-    axes[0, 2].set_title("Variância Intra-Imagem\n(diversidade de patches)")
-    axes[0, 2].set_xlabel("Var média entre patches")
+    axes[0, 2].set_title("Intra-Image Variance\n(patch diversity)")
+    axes[0, 2].set_xlabel("Avg variance across patches")
 
     # ── Dead features ────────────────────────────────────────────────────────
     dead_v = _dead_feature_ratio(V_mean)
@@ -366,25 +366,25 @@ def _plot_results(
     for bar, val in zip(bars, dead_vals):
         axes[0, 3].text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.3,
                         f"{val:.1f}%", ha="center", fontsize=10)
-    axes[0, 3].set_title("Dead Features\n(dim com ativação < 1e-4)")
-    axes[0, 3].set_ylabel("% dimensões")
+    axes[0, 3].set_title("Dead Features\n(dims with activation < 1e-4)")
+    axes[0, 3].set_ylabel("% dimensions")
     axes[0, 3].set_ylim(0, max(dead_vals) * 1.3 + 1)
 
     # ── Linha 2: Similaridade e alinhamento ──────────────────────────────────
-    axes[1, 0].hist(sims_pos, bins=60, color="#2ecc71", alpha=0.8, label="Par correto",  edgecolor="white", linewidth=0.3)
-    axes[1, 0].hist(sims_neg, bins=60, color="#e74c3c", alpha=0.6, label="Par aleatório", edgecolor="white", linewidth=0.3)
-    axes[1, 0].set_title("Distribuição de Similaridade\nCoseno Visual–Texto")
+    axes[1, 0].hist(sims_pos, bins=60, color="#2ecc71", alpha=0.8, label="Correct pair",  edgecolor="white", linewidth=0.3)
+    axes[1, 0].hist(sims_neg, bins=60, color="#e74c3c", alpha=0.6, label="Random pair", edgecolor="white", linewidth=0.3)
+    axes[1, 0].set_title("Cosine Similarity Distribution\nVisual–Text")
     axes[1, 0].set_xlabel("Coseno")
     axes[1, 0].legend()
 
     gap = sims_pos.mean() - sims_neg.mean()
-    axes[1, 1].bar(["Correto", "Aleatório"],
+    axes[1, 1].bar(["Correct", "Random"],
                    [sims_pos.mean(), sims_neg.mean()],
                    color=["#2ecc71", "#e74c3c"],
                    yerr=[sims_pos.std(), sims_neg.std()],
                    capsize=8, edgecolor="white")
-    axes[1, 1].set_title(f"Similaridade Média\nGap = {gap:.4f}")
-    axes[1, 1].set_ylabel("Coseno médio")
+    axes[1, 1].set_title(f"Average Similarity\nGap = {gap:.4f}")
+    axes[1, 1].set_ylabel("Avg cosine")
 
     # Heatmap de sub-matriz de similaridade
     n_h = min(n_heatmap, len(V))
@@ -426,14 +426,14 @@ def _plot_results(
     if G is not None:
         g_norms = _compute_norms(G, axis=-1)
         axes[2, 0].hist(g_norms, bins=60, color="#f39c12", edgecolor="white", linewidth=0.3)
-        axes[2, 0].set_title("Norma L2 — CLS Token (Global)")
-        axes[2, 0].set_xlabel("Norma L2")
+        axes[2, 0].set_title("L2 Norm — CLS Token (Global)")
+        axes[2, 0].set_xlabel("L2 Norm")
 
         # Distribuição de ativações do CLS
         g_mean_act = np.abs(G).mean(axis=0)
         axes[2, 1].plot(sorted(g_mean_act, reverse=True), color="#d35400", linewidth=0.8)
-        axes[2, 1].set_title("Ativação Média das Dimensões\n(CLS token, ordenado)")
-        axes[2, 1].set_xlabel("Dimensão (ordenada)"); axes[2, 1].set_ylabel("Ativação média")
+        axes[2, 1].set_title("Avg Dimension Activation\n(CLS token, sorted)")
+        axes[2, 1].set_xlabel("Dimension (sorted)"); axes[2, 1].set_ylabel("Avg activation")
         axes[2, 1].set_yscale("log")
 
         # PCA 2D do CLS
@@ -443,7 +443,7 @@ def _plot_results(
         coords = pca.fit_transform(G[idxs_pca])
         axes[2, 2].scatter(coords[:, 0], coords[:, 1], s=3, alpha=0.4, c="#8e44ad")
         var = pca.explained_variance_ratio_
-        axes[2, 2].set_title(f"PCA 2D — CLS Token\n(var exp: {100*var[0]:.1f}% + {100*var[1]:.1f}%)")
+        axes[2, 2].set_title(f"PCA 2D — CLS Token\n(exp var: {100*var[0]:.1f}% + {100*var[1]:.1f}%)")
         axes[2, 2].set_xlabel("PC1"); axes[2, 2].set_ylabel("PC2")
 
         # Correlação V_mean × G
@@ -451,14 +451,14 @@ def _plot_results(
         g_n      = G       / (np.linalg.norm(G,       axis=1, keepdims=True) + 1e-8)
         corr = (v_mean_n * g_n).sum(axis=1)   # coseno entre média dos patches e CLS
         axes[2, 3].hist(corr, bins=60, color="#16a085", edgecolor="white", linewidth=0.3)
-        axes[2, 3].set_title("Corr. CLS vs. Média Patches\n(quão representativo é o CLS)")
+        axes[2, 3].set_title("Corr. CLS vs. Avg Patches\n(how representative is the CLS)")
         axes[2, 3].set_xlabel("Coseno")
 
     plt.tight_layout()
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     plt.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close()
-    print(f"Gráfico salvo em: {out_path}")
+    print(f"Chart saved to: {out_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -490,7 +490,7 @@ def analyze(
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    print(f"\nCarregando até {max_samples:,} amostras de {shard_dir} ...")
+    print(f"\nLoading up to {max_samples:,} samples from {shard_dir} ...")
     V, T, G = _load_samples(shard_dir, max_samples)
 
     V_mean = V.mean(axis=1)          # [N, D] — representação por imagem
@@ -501,13 +501,13 @@ def analyze(
 
     # Cross-modal não disponível sem Aligner — usa intra-modal como alternativa
     if sims_pos is None:
-        print("  → Calculando similaridade intra-visual (diversidade dos patches)...")
+        print("  → Computing intra-visual similarity (patch diversity)...")
         sims_pos = _cosine_similarity_intra(V_mean, n_pairs=min(10_000, len(V_mean)))
-        print("  → Calculando similaridade intra-texto...")
+        print("  → Computing intra-text similarity...")
         sims_neg = _cosine_similarity_intra(T_flat, n_pairs=min(10_000, len(T_flat)))
         cross_modal_available = False
     else:
-        print("  → Calculando similaridade cross-modal negativa...")
+        print("  → Computing negative cross-modal similarity...")
         sims_neg = _cosine_similarity_random_pairs(V_mean, T_flat, n_pairs=n_neg_pairs)
         cross_modal_available = True
 
@@ -550,29 +550,29 @@ def analyze(
     json_path = os.path.join(output_dir, "dataset_analysis_embeddings.json")
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=4, ensure_ascii=False)
-    print(f"\nJSON salvo em: {json_path}")
+    print(f"\nJSON saved to: {json_path}")
 
     png_path = os.path.join(output_dir, "dataset_analysis_embeddings.png")
     _plot_results(V, T, G, sims_pos, sims_neg, png_path,cross_modal_available = False, n_heatmap=n_heatmap)
 
     print("\n" + "=" * 55)
-    print("RESUMO DA ANÁLISE DE EMBEDDINGS")
+    print("EMBEDDINGS ANALYSIS SUMMARY")
     print("=" * 55)
-    print(f"  Amostras            : {len(V):>10,}")
-    
+    print(f"  Samples             : {len(V):>10,}")
+
     if cross_modal_available:
-        print(f"  Sim+ média (V↔T correto)  : {sims_pos.mean():>10.4f}")
-        print(f"  Sim- média (V↔T aleatório): {sims_neg.mean():>10.4f}")
-        print(f"  Gap de alinhamento        : {gap:>10.4f}")
+        print(f"  Sim+ avg (V↔T correct)  : {sims_pos.mean():>10.4f}")
+        print(f"  Sim- avg (V↔T random)   : {sims_neg.mean():>10.4f}")
+        print(f"  Alignment gap           : {gap:>10.4f}")
     else:
-        print(f"  Sim intra-visual (diversidade): {sims_pos.mean():>10.4f}")
-        print(f"  Sim intra-texto  (diversidade): {sims_neg.mean():>10.4f}")
-        print(f"  (Cross-modal requer o Aligner projetando 768→4096)")
+        print(f"  Intra-visual sim (diversity): {sims_pos.mean():>10.4f}")
+        print(f"  Intra-text sim   (diversity): {sims_neg.mean():>10.4f}")
+        print(f"  (Cross-modal requires the Aligner projecting 768→4096)")
         
         
-    print(f"  Gap de alinhamento  : {gap:>10.4f}")
+    print(f"  Alignment gap       : {gap:>10.4f}")
     print(f"  Dead features visual: {_dead_feature_ratio(V_mean)*100:>9.1f}%")
-    print(f"  Dead features texto : {_dead_feature_ratio(T_flat)*100:>9.1f}%")
+    print(f"  Dead features text  : {_dead_feature_ratio(T_flat)*100:>9.1f}%")
     print("=" * 55)
 
 

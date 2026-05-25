@@ -242,19 +242,19 @@ def _plot_results(data: Dict, out_path: str, top_words: int = 30) -> None:
         Número de palavras mais frequentes a exibir.
     """
     fig, axes = plt.subplots(3, 4, figsize=(22, 16))
-    fig.suptitle("COYO Dataset — Análise de Distribuição", fontsize=16, fontweight="bold")
+    fig.suptitle("COYO Dataset — Distribution Analysis", fontsize=16, fontweight="bold")
 
     def _clean(lst: List, sentinel: float = 0.0) -> np.ndarray:
         return np.array([v for v in lst if v != sentinel], dtype=np.float64)
 
     # ── Linha 1: Geometria ───────────────────────────────────────────────────
     axes[0, 0].hist(_clean(data["widths"]),   bins=60, color="#3498db", edgecolor="white", linewidth=0.3)
-    axes[0, 0].set_title("Distribuição de Largura (px)")
-    axes[0, 0].set_xlabel("Largura"); axes[0, 0].set_ylabel("Contagem")
+    axes[0, 0].set_title("Width Distribution (px)")
+    axes[0, 0].set_xlabel("Width"); axes[0, 0].set_ylabel("Count")
 
     axes[0, 1].hist(_clean(data["heights"]),  bins=60, color="#2ecc71", edgecolor="white", linewidth=0.3)
-    axes[0, 1].set_title("Distribuição de Altura (px)")
-    axes[0, 1].set_xlabel("Altura")
+    axes[0, 1].set_title("Height Distribution (px)")
+    axes[0, 1].set_xlabel("Height")
 
     ar = _clean(data["aspect_ratios"])
     ar_clipped = np.clip(ar, 0.2, 5.0)
@@ -265,20 +265,20 @@ def _plot_results(data: Dict, out_path: str, top_words: int = 30) -> None:
     axes[0, 2].legend()
 
     axes[0, 3].hist(_clean(data["file_sizes_kb"]), bins=60, color="#e67e22", edgecolor="white", linewidth=0.3)
-    axes[0, 3].set_title("Tamanho em Disco (KB)")
+    axes[0, 3].set_title("File Size on Disk (KB)")
     axes[0, 3].set_xlabel("KB")
 
     # ── Linha 2: Cores RGB ───────────────────────────────────────────────────
     for ax, vals, label, color in [
-        (axes[1, 0], data["r_means"], "Média R", "#e74c3c"),
-        (axes[1, 1], data["g_means"], "Média G", "#27ae60"),
-        (axes[1, 2], data["b_means"], "Média B", "#2980b9"),
+        (axes[1, 0], data["r_means"], "Mean R", "#e74c3c"),
+        (axes[1, 1], data["g_means"], "Mean G", "#27ae60"),
+        (axes[1, 2], data["b_means"], "Mean B", "#2980b9"),
     ]:
         arr = np.array(vals, dtype=np.float32)
         arr = arr[arr > 0]
         ax.hist(arr, bins=60, color=color, edgecolor="white", linewidth=0.3)
-        ax.set_title(f"Distribuição {label}")
-        ax.set_xlabel("Valor [0,1]")
+        ax.set_title(f"Distribution {label}")
+        ax.set_xlabel("Value [0,1]")
 
     # Std RGB sobreposto
     for vals, label, color in [
@@ -289,33 +289,33 @@ def _plot_results(data: Dict, out_path: str, top_words: int = 30) -> None:
         arr = np.array(vals, dtype=np.float32)
         arr = arr[arr > 0]
         axes[1, 3].hist(arr, bins=60, color=color, alpha=0.5, label=label, edgecolor="white", linewidth=0.2)
-    axes[1, 3].set_title("Desvio Padrão RGB")
+    axes[1, 3].set_title("RGB Standard Deviation")
     axes[1, 3].set_xlabel("Std [0,1]")
     axes[1, 3].legend()
 
     # ── Linha 3: Captions ───────────────────────────────────────────────────
     cw = np.array([v for v in data["caption_lengths_words"] if v > 0], dtype=np.int32)
     axes[2, 0].hist(cw, bins=60, color="#1abc9c", edgecolor="white", linewidth=0.3)
-    axes[2, 0].set_title("Comprimento (palavras)")
-    axes[2, 0].set_xlabel("Nº de palavras")
+    axes[2, 0].set_title("Caption Length (words)")
+    axes[2, 0].set_xlabel("Number of words")
 
     cc = np.array([v for v in data["caption_lengths_chars"] if v > 0], dtype=np.int32)
     axes[2, 1].hist(cc, bins=60, color="#f39c12", edgecolor="white", linewidth=0.3)
-    axes[2, 1].set_title("Comprimento (caracteres)")
-    axes[2, 1].set_xlabel("Nº de caracteres")
+    axes[2, 1].set_title("Caption Length (characters)")
+    axes[2, 1].set_xlabel("Number of characters")
 
     # Top palavras
     top = data["word_counter"].most_common(top_words)
     words_labels = [w for w, _ in top]
     counts = [c for _, c in top]
     axes[2, 2].barh(words_labels[::-1], counts[::-1], color="#8e44ad", edgecolor="white", linewidth=0.3)
-    axes[2, 2].set_title(f"Top {top_words} Palavras")
-    axes[2, 2].set_xlabel("Frequência")
+    axes[2, 2].set_title(f"Top {top_words} Words")
+    axes[2, 2].set_xlabel("Frequency")
     axes[2, 2].tick_params(axis="y", labelsize=7)
 
     # Qualidade do dataset
     n = data["n_total"]
-    quality_labels = ["Válidas", "Corrompidas", "Sem caption", "Caption vazia"]
+    quality_labels = ["Valid", "Corrupted", "No caption", "Empty caption"]
     quality_vals = [
         n - data["n_corrupt"] - data["n_missing_caption"],
         data["n_corrupt"],
@@ -326,13 +326,13 @@ def _plot_results(data: Dict, out_path: str, top_words: int = 30) -> None:
     colors_q = ["#2ecc71", "#e74c3c", "#f39c12", "#95a5a6"]
     axes[2, 3].pie(quality_vals, labels=quality_labels, colors=colors_q,
                    autopct="%1.1f%%", startangle=140, textprops={"fontsize": 9})
-    axes[2, 3].set_title("Qualidade do Dataset")
+    axes[2, 3].set_title("Dataset Quality")
 
     plt.tight_layout()
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     plt.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close()
-    print(f"Gráfico salvo em: {out_path}")
+    print(f"Chart saved to: {out_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -384,26 +384,26 @@ def analyze(root_dir: str, max_samples: int, output_dir: str, top_words: int) ->
     json_path = os.path.join(output_dir, "dataset_analysis_images.json")
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=4, ensure_ascii=False)
-    print(f"JSON salvo em: {json_path}")
+    print(f"JSON saved to: {json_path}")
 
     png_path = os.path.join(output_dir, "dataset_analysis_images.png")
     _plot_results(data, png_path, top_words=top_words)
 
     # ── Impressão rápida ───────────────────────────────────────────────────
     print("\n" + "=" * 55)
-    print("RESUMO DA ANÁLISE DE IMAGENS")
+    print("IMAGE ANALYSIS SUMMARY")
     print("=" * 55)
-    print(f"  Amostras analisadas : {len(paths):>10,}")
-    print(f"  Imagens corrompidas : {data['n_corrupt']:>10,}  "
+    print(f"  Samples analyzed    : {len(paths):>10,}")
+    print(f"  Corrupted images    : {data['n_corrupt']:>10,}  "
           f"({100 * data['n_corrupt'] / max(len(paths), 1):.2f}%)")
-    print(f"  Sem caption         : {data['n_missing_caption']:>10,}")
+    print(f"  No caption          : {data['n_missing_caption']:>10,}")
     w_arr = np.array([v for v in data["widths"]  if v > 0])
     h_arr = np.array([v for v in data["heights"] if v > 0])
     if len(w_arr):
-        print(f"  Resolução mediana   : {int(np.median(w_arr))} × {int(np.median(h_arr))} px")
+        print(f"  Median resolution   : {int(np.median(w_arr))} × {int(np.median(h_arr))} px")
     cw_arr = np.array([v for v in data["caption_lengths_words"] if v > 0])
     if len(cw_arr):
-        print(f"  Caption mediana     : {int(np.median(cw_arr))} palavras")
+        print(f"  Median caption      : {int(np.median(cw_arr))} words")
     print("=" * 55)
 
 

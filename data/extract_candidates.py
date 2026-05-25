@@ -166,9 +166,9 @@ def main() -> None:
         print(f"VRAM: {free:.1f}/{total:.1f} GB livre")
 
     labels = load_vocab(args.vocab)
-    print(f"Labels carregados: {len(labels)} ({args.vocab})")
+    print(f"Labels loaded: {len(labels)} ({args.vocab})")
 
-    print(f"Carregando {args.model}...")
+    print(f"Loading {args.model}...")
     tokenizer = AutoTokenizer.from_pretrained(args.model, padding_side="left")
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token

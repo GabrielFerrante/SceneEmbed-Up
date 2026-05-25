@@ -1,0 +1,48 @@
+{
+  "label_a": "test_anyup",
+  "label_b": "test_noup",
+  "folder_a": "G:/coyo/embeds/test_anyup/",
+  "folder_b": "E:/COYO/embeds/test_noup/",
+  "n_samples": 5000,
+  "embedding_dim": 768,
+  "stats_a": {
+    "n_samples": 5000,
+    "dim": 768,
+    "norm_mean": 15.427900314331055,
+    "norm_std": 0.8698557615280151,
+    "norm_min": 13.307291030883789,
+    "norm_max": 17.60612678527832,
+    "centroid_norm": 11.137395858764648,
+    "mean_pairwise_cos": 0.5180050134658813,
+    "std_pairwise_cos": 0.1553056240081787
+  },
+  "stats_b": {
+    "n_samples": 5000,
+    "dim": 768,
+    "norm_mean": 15.290693283081055,
+    "norm_std": 0.8551220297813416,
+    "norm_min": 12.88312816619873,
+    "norm_max": 18.147493362426758,
+    "centroid_norm": 6.394216060638428,
+    "mean_pairwise_cos": 0.1759014129638672,
+    "std_pairwise_cos": 0.09415016323328018
+  },
+  "rdm_stats_a": {
+    "mean": 0.48300671577453613,
+    "std": 0.15628372132778168,
+    "min": -2.384185791015625e-07,
+    "max": 0.9980015158653259
+  },
+  "rdm_stats_b": {
+    "mean": 0.8255025744438171,
+    "std": 0.09495314955711365,
+    "min": -3.5762786865234375e-07,
+    "max": 1.192854404449463
+  },
+  "correlation": {
+    "pearson": 0.012798559815000098,
+    "spearman": 0.012270252664068108,
+    "n_pairs": 12497500,
+    "kendall_subset": 0.0074982292622482235
+  }
+}

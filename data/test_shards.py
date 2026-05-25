@@ -194,7 +194,7 @@ def compare(stats_a: Dict, stats_b: Dict, label_a: str, label_b: str) -> None:
     print(f"\n{'='*70}")
     print(f"COMPARAÇÃO: {label_a}  vs  {label_b}")
     print(f"{'='*70}")
-    print(f"  {'Métrica':<25} {label_a:>20} {label_b:>20}")
+    print(f"  {'Metric':<25} {label_a:>20} {label_b:>20}")
     print(f"  {'-'*25} {'-'*20:>20} {'-'*20:>20}")
 
     def row(name, va, vb, fmt="{:.4f}"):

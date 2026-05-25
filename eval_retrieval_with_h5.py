@@ -42,7 +42,7 @@ def diagnosticar_embeddings(
     n_batches:
         Número de batches a inspecionar.
     """
-    print("\n--- Diagnóstico de Embeddings H5 ---")
+    print("\n--- H5 Embeddings Diagnostic ---")
     for i, (visual_input, text_queries) in enumerate(dataloader):
         if i >= n_batches:
             break
@@ -59,9 +59,9 @@ def diagnosticar_embeddings(
         )
 
         if torch.isnan(visual_input).any() or torch.isnan(text_queries).any():
-            print("  [AVISO] NaN detectado nos embeddings!")
+            print("  [WARN] NaN detected in embeddings!")
 
-    print("--- Fim do Diagnóstico ---\n")
+    print("--- End of Diagnostic ---\n")
 
 
 # ---------------------------------------------------------------------------
@@ -236,8 +236,8 @@ class SceneGraphEvaluator:
         all_v_global: List[torch.Tensor] = []
         all_t_norm: List[torch.Tensor] = []
 
-        print("1. Extraindo representações visuais e textuais...")
-        for visual_input, text_queries in tqdm(dataloader, desc="Extração de embeddings"):
+        print("1. Extracting visual and text representations...")
+        for visual_input, text_queries in tqdm(dataloader, desc="Embedding extraction"):
             visual_input = visual_input.to(self.device).to(self.dtype)  # [B, N_patches, 768]
             text_queries = text_queries.to(self.device).to(self.dtype)  # [B, 1, 4096]
 
@@ -257,8 +257,8 @@ class SceneGraphEvaluator:
 
 
         # Diagnóstico — rode isso antes de calcular a matriz
-        print(f"V shape: {V.shape}, norm média: {V.norm(dim=-1).mean():.4f}")
-        print(f"T shape: {T.shape}, norm média: {T.norm(dim=-1).mean():.4f}")
+        print(f"V shape: {V.shape}, avg norm: {V.norm(dim=-1).mean():.4f}")
+        print(f"T shape: {T.shape}, avg norm: {T.norm(dim=-1).mean():.4f}")
         print(f"Similaridade V[0] vs T[0] (par correto): {(V[0] * T[0]).sum():.4f}")
         print(f"Similaridade V[0] vs T[1] (par errado):  {(V[0] * T[1]).sum():.4f}")
         print(f"V == T: {torch.allclose(V, T, atol=1e-3)}")
@@ -269,7 +269,7 @@ class SceneGraphEvaluator:
         )
 
         N = V.shape[0]
-        print(f"2. Construindo matriz de similaridade simétrica [{N}×{N}]...")
+        print(f"2. Building symmetric similarity matrix [{N}×{N}]...")
 
         # Constrói matriz simétrica e calcula Recall bidirecional
         sim_matrix = _build_sim_matrix(V, T, self.device, chunk_size)
@@ -298,7 +298,7 @@ if __name__ == "__main__":
         )
         print(f"Pesos carregados de {weights_path}")
     else:
-        print("Checkpoint não encontrado. Rodando com pesos aleatórios.")
+        print("Checkpoint not found. Running with random weights.")
 
     aligner.to(device).to(torch.bfloat16).eval()
 

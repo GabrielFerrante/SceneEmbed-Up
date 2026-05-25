@@ -68,9 +68,9 @@ def index_images(
         if p.suffix.lower() in extensions
     ]
     if not paths:
-        raise FileNotFoundError(f"Nenhuma imagem encontrada em {image_dir}")
+        raise FileNotFoundError(f"No images found in {image_dir}")
 
-    print(f"[index] {len(paths)} imagens encontradas")
+    print(f"[index] {len(paths)} images found")
     all_v: List[torch.Tensor] = []
 
     for path in tqdm(paths, desc="Indexando imagens"):
@@ -198,6 +198,20 @@ def main(args: argparse.Namespace) -> None:
 
     out_dir = os.path.join(args.output_dir, args.query.replace(" ", "_")[:40])
 
+    # --- Fase: salvar visualizações pré-rerank (sempre) ---
+    print(f"\n[viz] Salvando visualizações pré-rerank (top-{args.top_k}) em {out_dir}...")
+    for rank, ((img_path, score), sg, image) in enumerate(zip(results, sgs, images_cache), 1):
+        save_path = os.path.join(out_dir, f"rank{rank:02d}_{os.path.basename(img_path)}.png")
+        visualize_retrieval_result(
+            image=image,
+            sg=sg,
+            query_text=args.query,
+            retrieval_score=score,
+            save_path=save_path,
+            highlight_nodes=args.query.lower().split(),
+        )
+
+    # --- Fase: re-ranking semântico (opcional) — gera visualizações adicionais ---
     if args.rerank:
         print("\n[rerank] Re-ranking semantico via Qwen3 + scene graphs...")
         qwen = QwenSceneEmbedder(device=device)
@@ -238,19 +252,8 @@ def main(args: argparse.Namespace) -> None:
                 save_path=save_path,
                 alpha=args.rerank_alpha,
             )
-    else:
-        for rank, ((img_path, score), sg, image) in enumerate(zip(results, sgs, images_cache), 1):
-            save_path = os.path.join(out_dir, f"rank{rank:02d}_{os.path.basename(img_path)}.png")
-            visualize_retrieval_result(
-                image=image,
-                sg=sg,
-                query_text=args.query,
-                retrieval_score=score,
-                save_path=save_path,
-                highlight_nodes=args.query.lower().split(),
-            )
 
-    print(f"\n[done] Visualizações em {out_dir}")
+    print(f"\n[done] Visualizations saved to {out_dir}")
 
 
 if __name__ == "__main__":

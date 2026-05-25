@@ -52,9 +52,9 @@ def extrair_dataset():
         except Exception as e:
             print(f"Erro ao extrair {caminho_tar}: {e}")
 
-    print("\n--- Concluído ---")
-    print(f"Imagens organizadas em: {os.path.abspath(PASTA_DESTINO)}")
-    print("Cada subpasta contém os pares (imagem.jpg + imagem.txt)")
+    print("\n--- Done ---")
+    print(f"Images organized in: {os.path.abspath(PASTA_DESTINO)}")
+    print("Each subfolder contains the pairs (image.jpg + image.txt)")
 
 if __name__ == "__main__":
     extrair_dataset()

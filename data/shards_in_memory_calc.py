@@ -21,12 +21,12 @@ if __name__ == '__main__':
     ram_used_gb     = bytes_per_shard * shards_in_ram / 1e9
 
     print(f"Shards totais:        {total_shards}")
-    print(f"Amostras por shard:   {n_per_shard:,}")
-    print(f"Amostras totais:      {total_samples:,}")
-    print(f"Tamanho por shard:    {bytes_per_shard / 1e6:.1f} MB")
-    print(f"RAM total necessária: {total_gb:.1f} GB")
+    print(f"Samples per shard:    {n_per_shard:,}")
+    print(f"Total samples:        {total_samples:,}")
+    print(f"Size per shard:       {bytes_per_shard / 1e6:.1f} MB")
+    print(f"Total RAM required:   {total_gb:.1f} GB")
     print(f"─────────────────────────────────────────")
-    print(f"Shards que cabem em {max_ram_gb:.0f} GB: {shards_in_ram}")
-    print(f"RAM que será usada:   {ram_used_gb:.1f} GB")
-    print(f"Amostras em memória:  {n_per_shard * shards_in_ram:,} / {total_samples:,} "
-          f"({100 * shards_in_ram / total_shards:.1f}% do dataset)")
+    print(f"Shards fitting in {max_ram_gb:.0f} GB: {shards_in_ram}")
+    print(f"RAM that will be used:{ram_used_gb:.1f} GB")
+    print(f"Samples in memory:    {n_per_shard * shards_in_ram:,} / {total_samples:,} "
+          f"({100 * shards_in_ram / total_shards:.1f}% of dataset)")

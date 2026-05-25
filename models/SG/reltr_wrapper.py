@@ -193,9 +193,9 @@ class RelTRWrapper:
         if os.path.exists(checkpoint):
             state = torch.load(checkpoint, map_location=self.device, weights_only=False)
             model.load_state_dict(state["model"], strict=False)
-            print(f"[RelTR] Pesos carregados de {checkpoint}")
+            print(f"[RelTR] Weights loaded from {checkpoint}")
         else:
-            print(f"[RelTR] AVISO: checkpoint não encontrado em {checkpoint}. Usando pesos aleatórios.")
+            print(f"[RelTR] WARNING: checkpoint not found at {checkpoint}. Using random weights.")
 
         model.to(self.device).eval()
         return model

@@ -118,9 +118,9 @@ if __name__ == "__main__":
             torch.load(weights_path, map_location=device),
             strict=False
         )
-        print(f"Pesos carregados de {weights_path}")
+        print(f"Weights loaded from {weights_path}")
     else:
-        print("Checkpoint não encontrado. Rodando com pesos aleatórios.")
+        print("Checkpoint not found. Running with random weights.")
 
     aligner.to(device).eval()
 
@@ -138,7 +138,7 @@ if __name__ == "__main__":
         t="test"
     )
 
-    print("\n--- Avaliando Alinhamento (Recall@K) ---")
+    print("\n--- Evaluating Alignment (Recall@K) ---")
     recall_results = evaluator.evaluate_projection(
         test_dataloader,
         k_values=[1, 5, 10]

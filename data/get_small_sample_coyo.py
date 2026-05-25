@@ -14,7 +14,7 @@ def baixar_amostra():
     if not os.path.exists(PASTA_SAIDA):
         os.makedirs(PASTA_SAIDA)
     
-    print(f"--- Iniciando conexão com COYO-700M (Modo Streaming) ---")
+    print(f"--- Starting connection to COYO-700M (Streaming Mode) ---")
     
     # 2. Carrega o dataset em modo streaming (não baixa o arquivo gigante)
     # Isso permite ler item por item instantaneamente via internet

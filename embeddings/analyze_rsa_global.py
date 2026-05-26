@@ -362,7 +362,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--n_samples", type=int, default=5000,
                         help="Samples per set for the RDM (default: 5000)")
-    parser.add_argument("--split", choices=["train", "val", "test", "all"], default="test")
+    parser.add_argument("--split", choices=["train", "val", "test", "all"], default="all")
     parser.add_argument("--folder_anyup", type=str, default=None,
                         help="Override directory of AnyUp set")
     parser.add_argument("--folder_noup", type=str, default=None,

@@ -1,0 +1,14 @@
+{
+  "split": "val",
+  "kernel": "rbf",
+  "device": "cuda",
+  "library": "ckatorch",
+  "n_samples": 10000,
+  "folder_anyup": "G:/coyo/embeds/val_anyup/",
+  "folder_noup": "E:/COYO/embeds/val_noup/",
+  "cka": {
+    "visual_anyup <-> text": 0.04197687283158302,
+    "visual_noup  <-> text": -0.0008220010786317289,
+    "visual_anyup <-> visual_noup": 0.00018533422553446144
+  }
+}

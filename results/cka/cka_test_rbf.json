@@ -1,14 +1,14 @@
 {
   "split": "test",
-  "kernel": "linear",
+  "kernel": "rbf",
   "device": "cuda",
   "library": "ckatorch",
   "n_samples": 10000,
   "folder_anyup": "G:/coyo/embeds/test_anyup/",
   "folder_noup": "E:/COYO/embeds/test_noup/",
   "cka": {
-    "visual_anyup <-> text": 0.03316393494606018,
-    "visual_noup  <-> text": -0.0051078200340271,
-    "visual_anyup <-> visual_noup": -0.00161891954485327
+    "visual_anyup <-> text": 0.044923778623342514,
+    "visual_noup  <-> text": 0.0018058825517073274,
+    "visual_anyup <-> visual_noup": 0.0018087655771523714
   }
 }

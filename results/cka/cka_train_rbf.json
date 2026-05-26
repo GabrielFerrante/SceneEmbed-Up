@@ -1,0 +1,14 @@
+{
+  "split": "train",
+  "kernel": "rbf",
+  "device": "cuda",
+  "library": "ckatorch",
+  "n_samples": 50000,
+  "folder_anyup": "F:/COYO/embeds/train_anyup/",
+  "folder_noup": "E:/COYO/embeds/train_noup/",
+  "cka": {
+    "visual_anyup <-> text": 0.03800351172685623,
+    "visual_noup  <-> text": -0.0011290221009403467,
+    "visual_anyup <-> visual_noup": 0.0028929482214152813
+  }
+}

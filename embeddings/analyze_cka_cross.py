@@ -394,9 +394,9 @@ def run_cka_analysis(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="CKA via ckatorch entre visual e text embeddings")
-    parser.add_argument("--n_samples", type=int, default=5000)
-    parser.add_argument("--split", choices=["train", "val", "test", "all"], default="test")
-    parser.add_argument("--kernel", choices=["linear", "rbf"], default="linear",
+    parser.add_argument("--n_samples", type=int, default=50000)
+    parser.add_argument("--split", choices=["train", "val", "test", "all"], default="all")
+    parser.add_argument("--kernel", choices=["linear", "rbf"], default="rbf",
                         help="Tipo de kernel para Gram matrices (default: linear)")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--folder_anyup", type=str, default=None)

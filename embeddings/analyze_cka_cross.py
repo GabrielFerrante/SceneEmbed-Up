@@ -3,29 +3,24 @@ analyze_cka_cross.py
 --------------------
 Centered Kernel Alignment (CKA) entre embeddings visuais e textuais.
 
-CKA mede aderência geométrica entre dois espaços de representação MESMO
+Usa a biblioteca `ckatorch` (https://github.com/RistoAle97/centered-kernel-alignment),
+que implementa CKA em PyTorch com suporte a minibatch HSIC.
+
+CKA mede aderência geométrica entre dois espaços de representação mesmo
 quando suas dimensões nativas são diferentes (768 vs 4096). Olha para as
 relações entre N amostras, não para as dimensões de cada amostra.
-
-Pipeline:
-  A. Constroi Gram matrices K (visual) e L (textual), ambas [N, N]
-  B. Centraliza ambas: K' = H K H, com H = I - (1/N) 11ᵀ
-  C. Calcula HSIC(K', L') = trace(K' L') / (N-1)²
-  D. Normaliza: CKA = HSIC(K,L) / sqrt(HSIC(K,K) · HSIC(L,L))
-
-Interpretação:
-  - 1.0 → geometrias idênticas (mesmo arranjo relativo das N amostras)
-  - 0.0 → arranjos totalmente independentes
-  - >0.5 → forte alinhamento (típico em modelos bem treinados)
 
 Comparações executadas (texto é único — Qwen é determinístico):
   1. Visual_global (anyup) ↔ Text                  — alinhamento bruto com upsampling
   2. Visual_global (noup)  ↔ Text                  — alinhamento bruto sem upsampling
   3. Visual_global (anyup) ↔ Visual_global (noup)  — preservação geométrica do CLS
 
+Instalação da dependência:
+    pip install ckatorch
+
 Uso:
     python embeddings/analyze_cka_cross.py
-    python embeddings/analyze_cka_cross.py --n_samples 5000 --kernel rbf
+    python embeddings/analyze_cka_cross.py --n_samples 5000 --kernel linear
 """
 
 from __future__ import annotations
@@ -42,104 +37,155 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
+from torch.utils.data import DataLoader
+
+# ckatorch — biblioteca oficial de CKA em PyTorch
+try:
+    from ckatorch import CKA
+except ImportError as e:
+    raise ImportError(
+        "ckatorch nao encontrado. Instale com:\n"
+        "  pip install ckatorch\n"
+        f"Erro original: {e}"
+    )
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from utils.io_utils import ensure_dir
 
 
 # ---------------------------------------------------------------------------
-# Kernels
+# Wrapper de chamada robusto à variação de API
 # ---------------------------------------------------------------------------
 
-def linear_kernel(X: np.ndarray) -> np.ndarray:
-    """Gram matrix com produto escalar: K = X Xᵀ"""
-    return X @ X.T
-
-
-def rbf_kernel(X: np.ndarray, sigma: float | None = None) -> np.ndarray:
+class _PairedFeatureDataset(torch.utils.data.Dataset):
     """
-    Gram matrix com kernel RBF (gaussiano).
+    Dataset que devolve dict {"x": [chunk, Dx], "y": [chunk, Dy]} por índice.
 
-    sigma=None → bandwidth via mediana das distâncias (heurística padrão)
+    A ckatorch.CKA espera ativações 3D [B, T, D] (torch.bmm interno) com T>1
+    para evitar variância zero no HSIC. Como temos embeddings globais [N, D],
+    agrupamos `chunk_size` amostras em cada item: cada índice devolve um
+    "batch de tokens" pronto pra ser consumido como pseudo-transformer.
+
+    Após DataLoader, batches ficam [B_loader, chunk, D] — ckatorch faz bmm
+    sobre o eixo do meio (T = chunk) e o HSIC tem material para centralizar.
     """
-    norms = (X * X).sum(axis=1)
-    sq_d = np.maximum(norms[:, None] + norms[None, :] - 2.0 * (X @ X.T), 0.0)
 
-    if sigma is None:
-        # Mediana dos elementos não-diagonais
-        n = X.shape[0]
-        mask = ~np.eye(n, dtype=bool)
-        sigma = np.sqrt(np.median(sq_d[mask]) / 2.0)
-        sigma = max(sigma, 1e-12)
+    def __init__(self, X: torch.Tensor, Y: torch.Tensor, chunk_size: int = 64) -> None:
+        assert X.shape[0] == Y.shape[0], "X e Y devem ter mesmo N"
+        N = X.shape[0]
+        # Trunca para múltiplo de chunk_size
+        usable = (N // chunk_size) * chunk_size
+        if usable < N:
+            X = X[:usable]
+            Y = Y[:usable]
+        # Reshape para [N/chunk_size, chunk_size, D]
+        self.X = X.reshape(-1, chunk_size, X.shape[-1])
+        self.Y = Y.reshape(-1, chunk_size, Y.shape[-1])
 
-    K = np.exp(-sq_d / (2.0 * sigma * sigma))
-    return K
+    def __len__(self) -> int:
+        return self.X.shape[0]
+
+    def __getitem__(self, idx: int):
+        return {"x": self.X[idx], "y": self.Y[idx]}
 
 
-# ---------------------------------------------------------------------------
-# HSIC e CKA
-# ---------------------------------------------------------------------------
-
-def center_gram(K: np.ndarray) -> np.ndarray:
+class _FeatureCarrier(torch.nn.Module):
     """
-    Centraliza Gram matrix: K' = H K H, onde H = I - (1/N) 11ᵀ.
+    Modelo Identity-wrapper que devolve a feature da chave configurada.
 
-    Computacionalmente equivalente a subtrair média de linhas/colunas
-    e adicionar média global.
+    A ckatorch chama `model(**batch)` desempacotando o dict como kwargs.
+    Cada batch chega como [B_loader, chunk, D] — formato 3D que a CKA
+    consome via torch.bmm internamente.
     """
-    n = K.shape[0]
-    means_row = K.mean(axis=0, keepdims=True)         # [1, N]
-    means_col = K.mean(axis=1, keepdims=True)         # [N, 1]
-    mean_all = K.mean()
-    return K - means_row - means_col + mean_all
+
+    def __init__(self, key: str) -> None:
+        super().__init__()
+        self.key = key
+        self.layer = torch.nn.Identity()
+
+    def forward(self, **kwargs):
+        return self.layer(kwargs[self.key])
 
 
-def hsic(K_c: np.ndarray, L_c: np.ndarray) -> float:
+def _cka_score(
+    X: np.ndarray,
+    Y: np.ndarray,
+    kernel: str = "linear",   # noqa: ARG001 — ckatorch usa linear por padrão; mantido p/ compat de API
+    device: str = "cuda",
+    batch_size: int = 8,
+    chunk_size: int = 64,
+    epochs: int = 10,
+) -> float:
     """
-    HSIC com matrizes já centralizadas: trace(K_c L_c) / (N-1)²
+    Calcula CKA(X, Y) usando ckatorch.CKA com dois modelos Identity-wrapper.
 
-    Implementação via produto Frobenius: sum(K_c * L_c) = trace(K_c L_c)
-    para matrizes simétricas centralizadas.
-    """
-    n = K_c.shape[0]
-    return float(np.sum(K_c * L_c) / ((n - 1) ** 2))
-
-
-def cka(X: np.ndarray, Y: np.ndarray, kernel: str = "linear") -> float:
-    """
-    Centered Kernel Alignment entre X [N, Dx] e Y [N, Dy].
+    A ckatorch.CKA exige (first_model, second_model, layers). Para tensores
+    já extraídos, criamos modelos dummy que devolvem as próprias features
+    via uma camada Identity. CKA registra hook nessa camada e calcula HSIC.
 
     Parameters
     ----------
-    X, Y:
-        Matrizes de features com mesmo número de amostras N.
-    kernel:
-        'linear' ou 'rbf'.
+    X, Y : np.ndarray  com shape [N, Dx] e [N, Dy].
+    kernel : "linear" ou "rbf"  (mantido por compatibilidade; ckatorch usa kernel linear).
+    device : torch device.
 
     Returns
     -------
     float em [0, 1]
     """
-    if kernel == "linear":
-        K = linear_kernel(X)
-        L = linear_kernel(Y)
-    elif kernel == "rbf":
-        K = rbf_kernel(X)
-        L = rbf_kernel(Y)
-    else:
-        raise ValueError(f"Kernel desconhecido: {kernel}")
+    _ = kernel  # ckatorch v0.x não expõe parâmetro de kernel pública na CKA principal
+    Xt = torch.from_numpy(X).float()
+    Yt = torch.from_numpy(Y).float()
 
-    K_c = center_gram(K)
-    L_c = center_gram(L)
+    model_x = _FeatureCarrier(key="x").to(device).eval()
+    model_y = _FeatureCarrier(key="y").to(device).eval()
 
-    h_xy = hsic(K_c, L_c)
-    h_xx = hsic(K_c, K_c)
-    h_yy = hsic(L_c, L_c)
+    # DataLoader com dict[str, Tensor] — exigido pela ckatorch.CKA
+    # chunk_size agrupa amostras em pseudo-tokens p/ HSIC ter material
+    dataset = _PairedFeatureDataset(Xt, Yt, chunk_size=chunk_size)
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=0,
+        drop_last=False,
+    )
 
-    denom = np.sqrt(h_xx * h_yy)
-    if denom < 1e-12:
-        return float("nan")
-    return float(h_xy / denom)
+    # Tenta a assinatura padrão de ckatorch.CKA
+    try:
+        cka = CKA(
+            first_model=model_x,
+            second_model=model_y,
+            layers=["layer"],          # nome da Identity em ambos modelos
+            first_name="anyup",
+            second_name="noup",
+            device=device,
+        )
+    except TypeError:
+        # Versões mais antigas/diferentes podem não ter first_name/second_name
+        cka = CKA(
+            first_model=model_x,
+            second_model=model_y,
+            layers=["layer"],
+            device=device,
+        )
+
+    # Executa CKA. A assinatura interna do ckatorch.CKA.__call__ é
+    # algo como `__call__(self, dataloader, epochs)` — epochs é o
+    # SEGUNDO posicional, não-keyword. Passamos posicionalmente.
+    with torch.no_grad():
+        result = cka(loader, epochs)
+
+    # Resultado costuma vir como tensor/matriz [n_layers_x, n_layers_y]
+    if torch.is_tensor(result):
+        if result.numel() == 1:
+            return float(result.item())
+        # Matriz — pega o [0, 0] que é a comparação layer↔layer
+        return float(result[0, 0].item())
+    if isinstance(result, np.ndarray):
+        return float(result.flat[0])
+    return float(result)
 
 
 # ---------------------------------------------------------------------------
@@ -158,7 +204,7 @@ def load_embeddings(
     -------
     dict com:
         visual_global: [N, 768]  float32
-        text_feats:    [N, 4096] float32 (squeezed)
+        text_feats:    [N, 4096] float32 (squeezed se vier [N, 1, 4096])
     """
     pattern = os.path.join(folder, "**", "*.h5")
     files = sorted(glob.glob(pattern, recursive=True))
@@ -178,14 +224,13 @@ def load_embeddings(
                     print(f"  [WARN] {os.path.basename(f)} sem {missing} — pulado")
                     continue
 
-                # Determina take pelo primeiro key
                 n_avail = h5[keys[0]].shape[0]
                 take = min(n_avail, n_samples - collected)
 
                 for k in keys:
                     arr = h5[k][:take].astype(np.float32)
                     if k == "text_feats" and arr.ndim == 3:
-                        arr = arr.squeeze(1)            # [N, 1, 4096] → [N, 4096]
+                        arr = arr.squeeze(1)
                     chunks[k].append(arr)
                 collected += take
         except Exception as e:
@@ -199,13 +244,8 @@ def load_embeddings(
 # Visualização
 # ---------------------------------------------------------------------------
 
-def plot_cka_matrix(
-    results: dict,
-    save_path: str,
-) -> None:
-    """
-    Heatmap das CKAs computadas + barplot horizontal.
-    """
+def plot_cka_matrix(results: dict, save_path: str) -> None:
+    """Barplot horizontal das CKAs computadas."""
     labels = list(results.keys())
     values = [results[k] for k in labels]
 
@@ -215,7 +255,7 @@ def plot_cka_matrix(
         ax.text(bar.get_width() + 0.01, bar.get_y() + bar.get_height() / 2,
                 f"{v:.4f}", va="center", fontsize=10)
     ax.set_xlim(0, 1.05)
-    ax.set_xlabel("CKA")
+    ax.set_xlabel("CKA (ckatorch)")
     ax.set_title("Centered Kernel Alignment")
     ax.axvline(0.5, color="gray", linestyle="--", lw=1, alpha=0.5, label="strong alignment >= 0.5")
     ax.grid(alpha=0.3, axis="x")
@@ -238,19 +278,16 @@ def run_cka_analysis(
     output_dir: str,
     split: str,
     kernel: str = "linear",
+    device: str = "cuda",
 ) -> dict:
     """
-    Computa CKA entre os pares relevantes:
+    Computa CKA via ckatorch entre os pares relevantes:
       - visual_anyup ↔ text                  (alinhamento bruto com AnyUp)
       - visual_noup  ↔ text                  (alinhamento bruto sem AnyUp)
       - visual_anyup ↔ visual_noup           (preservação geométrica do CLS)
-
-    Nota: o text_feats é determinístico (Qwen sobre o mesmo caption), então
-    usa-se UM SÓ tensor de texto. Antes, verifica-se que os dois shards
-    contêm o mesmo texto via norma da diferença (sanity check).
     """
     print(f"\n{'═' * 70}")
-    print(f"  CKA  —  split={split}  kernel={kernel}  N={n_samples}")
+    print(f"  CKA (ckatorch)  —  split={split}  kernel={kernel}  N={n_samples}")
     print(f"{'═' * 70}")
 
     print(f"\n[1/3] Loading embeddings...")
@@ -262,7 +299,6 @@ def run_cka_analysis(
     t_anyup = data_anyup["text_feats"]
     t_noup  = data_noup["text_feats"]
 
-    # Truncar para a menor cardinalidade
     n = min(v_anyup.shape[0], v_noup.shape[0], t_anyup.shape[0], t_noup.shape[0])
     v_anyup, v_noup = v_anyup[:n], v_noup[:n]
     t_anyup, t_noup = t_anyup[:n], t_noup[:n]
@@ -282,10 +318,10 @@ def run_cka_analysis(
     else:
         print(f"  [WARN] Texts diverge by {diff:.4f} -- shards NOT aligned per sample!")
         print(f"         Splits were shuffled in different orders during extraction.")
-        print(f"         visual<->text CKA will be biased. Consider regenerating with the same seed.")
-        t = t_anyup  # usa anyup como referência mesmo assim
+        print(f"         visual<->text CKA will be biased.")
+        t = t_anyup
 
-    print(f"\n[2/3] Computing CKAs ({kernel})...")
+    print(f"\n[2/3] Computing CKAs via ckatorch ({kernel})...")
 
     pairs = {
         "visual_anyup <-> text":         (v_anyup, t),
@@ -295,7 +331,7 @@ def run_cka_analysis(
 
     results: dict = {}
     for name, (X, Y) in pairs.items():
-        score = cka(X, Y, kernel=kernel)
+        score = _cka_score(X, Y, kernel=kernel, device=device)
         results[name] = score
         print(f"  {name:<32}  CKA = {score:.6f}")
 
@@ -332,6 +368,8 @@ def run_cka_analysis(
     report = {
         "split": split,
         "kernel": kernel,
+        "device": device,
+        "library": "ckatorch",
         "n_samples": int(n),
         "folder_anyup": folder_anyup,
         "folder_noup": folder_noup,
@@ -355,12 +393,12 @@ def run_cka_analysis(
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="CKA entre visual e text embeddings")
-    parser.add_argument("--n_samples", type=int, default=5000,
-                        help="Amostras pareadas por conjunto (default: 5000)")
+    parser = argparse.ArgumentParser(description="CKA via ckatorch entre visual e text embeddings")
+    parser.add_argument("--n_samples", type=int, default=5000)
     parser.add_argument("--split", choices=["train", "val", "test", "all"], default="test")
     parser.add_argument("--kernel", choices=["linear", "rbf"], default="linear",
-                        help="Kernel para Gram matrices (default: linear)")
+                        help="Tipo de kernel para Gram matrices (default: linear)")
+    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--folder_anyup", type=str, default=None)
     parser.add_argument("--folder_noup", type=str, default=None)
     parser.add_argument("--output_dir", type=str, default="results/cka")
@@ -396,13 +434,13 @@ if __name__ == "__main__":
             output_dir=args.output_dir,
             split=split,
             kernel=args.kernel,
+            device=args.device,
         )
         all_reports[split] = report
 
-    # Sumário final
     if len(all_reports) > 1:
         print(f"\n\n{'═' * 70}")
-        print(f"  FINAL SUMMARY -- CKA per split")
+        print(f"  FINAL SUMMARY -- CKA (ckatorch) per split")
         print(f"{'═' * 70}")
         pairs_keys = list(next(iter(all_reports.values()))["cka"].keys())
         header = f"  {'Split':<8} " + "".join(f"{k[:24]:>26}" for k in pairs_keys)

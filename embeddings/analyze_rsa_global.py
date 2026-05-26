@@ -1,8 +1,10 @@
 """
 analyze_rsa_global.py
 ---------------------
-Representational Similarity Analysis (RSA) sobre os embeddings globais
-(visual_global / token CLS do DINOv3) dos shards COYO.
+Representational Similarity Analysis (RSA) sobre embeddings globais
+(visual_global / token CLS do DINOv3) usando a biblioteca `rsatoolbox`.
+
+https://rsatoolbox.readthedocs.io/en/stable/
 
 Compara a geometria intra-visual entre dois conjuntos:
   A. Embeddings extraídos COM AnyUp upsampling
@@ -10,23 +12,25 @@ Compara a geometria intra-visual entre dois conjuntos:
 
 Pipeline:
   1. Carrega visual_global de N shards de cada conjunto
-  2. Constrói RDM (Representational Dissimilarity Matrix) [N_samples, N_samples]
-     usando 1 − cosine_similarity
-  3. Calcula correlações entre as duas RDMs:
-        - Spearman (rank-based, padrão em neurociência computacional)
-        - Pearson  (linear)
-        - Kendall tau (opcional, mais robusto a outliers)
-  4. Gera estatísticas de magnitude (norm) e dispersão dos embeddings
-  5. Salva relatório JSON + visualizações PNG
+  2. Envelopa cada matriz como `rsatoolbox.data.Dataset`
+  3. Computa RDMs com `rsatoolbox.rdm.calc_rdm(method=...)`
+     Métodos suportados: euclidean | correlation | mahalanobis | crossnobis | poisson
+  4. Compara as RDMs com `rsatoolbox.rdm.compare(method=...)`
+     Métodos suportados: cosine | corr | cosine_cov | corr_cov | tau-a | rho-a
+  5. Salva relatório JSON + visualização PNG (via rsatoolbox.vis quando possível)
 
 Interpretação:
-  - corr ≈ 1.00 → upsampling preserva geometria global (semanticamente seguro)
-  - corr ≈ 0.90 → preservação parcial; mudanças localizadas
-  - corr ≤ 0.70 → upsampling reorganiza significativamente o espaço
+  - sim ≈ 1.00 → upsampling preserva geometria global
+  - sim ≈ 0.90 → preservação parcial
+  - sim ≤ 0.70 → upsampling reorganiza significativamente o espaço
 
 Uso:
     python embeddings/analyze_rsa_global.py
-    python embeddings/analyze_rsa_global.py --n_samples 5000 --split test
+    python embeddings/analyze_rsa_global.py --n_samples 5000 --split test \
+        --rdm_method correlation --compare_method rho-a
+
+Dependência:
+    pip install rsatoolbox
 """
 
 from __future__ import annotations
@@ -44,6 +48,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+# rsatoolbox — núcleo da análise
+import rsatoolbox
+import rsatoolbox.data as rsd
+import rsatoolbox.rdm as rsr
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from utils.io_utils import ensure_dir
 
@@ -55,13 +64,9 @@ from utils.io_utils import ensure_dir
 def load_visual_global(
     folder: str,
     n_samples: int,
-    seed: int = 42,
 ) -> Tuple[np.ndarray, int]:
     """
-    Carrega `n_samples` embeddings globais dos shards do diretório.
-
-    Lê sequencialmente os shards até atingir n_samples. Retorna também o total
-    de amostras disponíveis (útil para diagnóstico).
+    Carrega `n_samples` embeddings globais dos shards.
 
     Returns
     -------
@@ -87,7 +92,7 @@ def load_visual_global(
                 if "visual_global" not in h5:
                     print(f"  [WARN] '{os.path.basename(f)}' sem visual_global — pulado")
                     continue
-                vg = h5["visual_global"][:]   # [N, 768]
+                vg = h5["visual_global"][:]
                 total_available += vg.shape[0]
                 take = min(vg.shape[0], n_samples - collected)
                 all_emb.append(vg[:take].astype(np.float32))
@@ -96,206 +101,129 @@ def load_visual_global(
             print(f"  [WARN] Falha ao ler {f}: {e}")
 
     if not all_emb:
-        raise RuntimeError(f"Nenhum visual_global válido encontrado em {folder}")
+        raise RuntimeError(f"Nenhum visual_global válido em {folder}")
 
     embeddings = np.concatenate(all_emb, axis=0)[:n_samples]
-
-    # Conta o total real (pode passar de n_samples)
-    for f in files:
-        try:
-            with h5py.File(f, "r") as h5:
-                if "visual_global" in h5 and f not in (g[0] for g in all_emb):
-                    pass  # já contado acima
-        except Exception:
-            pass
-
     return embeddings, total_available
 
 
 # ---------------------------------------------------------------------------
-# RDM construction
+# Construção de Dataset e RDM via rsatoolbox
 # ---------------------------------------------------------------------------
 
-def build_rdm_cosine(embeddings: np.ndarray) -> np.ndarray:
+def build_dataset(
+    embeddings: np.ndarray,
+    name: str,
+) -> rsd.Dataset:
     """
-    Constrói Representational Dissimilarity Matrix usando 1 − cosine.
+    Envelopa `[N, D]` num `rsatoolbox.data.Dataset`.
 
-    RDM[i, j] = 1 − (e_i · e_j) / (||e_i|| ||e_j||)
+    Adiciona descriptors para rastreabilidade: cada observação ganha um índice
+    e o dataset recebe um nome (útil para batch processing).
+    """
+    n = embeddings.shape[0]
+    return rsd.Dataset(
+        measurements=embeddings,
+        descriptors={"name": name},
+        obs_descriptors={"index": np.arange(n)},
+    )
+
+
+def compute_rdm(
+    dataset: rsd.Dataset,
+    method: str = "correlation",
+) -> rsr.RDMs:
+    """
+    Calcula RDM via rsatoolbox.
 
     Parameters
     ----------
-    embeddings:
-        `[N, D]` array.
-
-    Returns
-    -------
-    rdm:
-        `[N, N]` matriz simétrica com zeros na diagonal, valores em [0, 2].
+    method:
+        - 'correlation' → 1 - Pearson (padrão histórico em RSA)
+        - 'euclidean'   → distância euclidiana normalizada por canais
+        - 'mahalanobis' → requer noise precision matrix (não usado aqui)
+        - 'crossnobis'  → distância unbiased entre runs (não aplicável)
+        - 'poisson'     → KL-divergence simétrica (não aplicável)
     """
-    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-    norms = np.clip(norms, 1e-12, None)
-    normed = embeddings / norms
-    sim = normed @ normed.T               # cosine similarity
-    rdm = 1.0 - sim
-    np.fill_diagonal(rdm, 0.0)
-    return rdm
+    return rsr.calc_rdm(dataset, method=method)
 
 
-def upper_triangle(matrix: np.ndarray) -> np.ndarray:
-    """Extrai o triângulo superior (sem diagonal) como vetor 1D."""
-    iu = np.triu_indices_from(matrix, k=1)
-    return matrix[iu]
-
-
-# ---------------------------------------------------------------------------
-# Correlações entre RDMs
-# ---------------------------------------------------------------------------
-
-def rsa_correlate(rdm_a: np.ndarray, rdm_b: np.ndarray) -> dict:
+def compare_rdms(
+    rdm_a: rsr.RDMs,
+    rdm_b: rsr.RDMs,
+    method: str = "rho-a",
+) -> float:
     """
-    Calcula correlações Pearson/Spearman/Kendall entre dois RDMs.
+    Compara duas RDMs via rsatoolbox.rdm.compare.
 
-    Usa apenas o triângulo superior para evitar correlação inflada por
-    simetria/diagonal.
+    `rsatoolbox.rdm.compare` retorna matriz `[n_rdms_a, n_rdms_b]` com
+    similaridades pairwise. Como temos 1 RDM por lado, extraímos `[0, 0]`.
 
-    Returns
-    -------
-    dict com 'pearson', 'spearman' e (se scipy disponível) 'kendall'.
+    Parameters
+    ----------
+    method:
+        - 'cosine'     → cosine similarity
+        - 'corr'       → Pearson (correlação de Pearson entre RDMs)
+        - 'cosine_cov' → whitened cosine
+        - 'corr_cov'   → whitened correlation
+        - 'tau-a'      → Kendall tau-a
+        - 'rho-a'      → Spearman rho-a (recomendado pela doc)
     """
-    va = upper_triangle(rdm_a)
-    vb = upper_triangle(rdm_b)
-
-    # Pearson via numpy (rápido)
-    pearson = float(np.corrcoef(va, vb)[0, 1])
-
-    # Spearman: rank manual evita dependência opcional do scipy
-    rank_a = _rank_data(va)
-    rank_b = _rank_data(vb)
-    spearman = float(np.corrcoef(rank_a, rank_b)[0, 1])
-
-    out = {"pearson": pearson, "spearman": spearman, "n_pairs": int(len(va))}
-
-    try:
-        from scipy.stats import kendalltau
-        # Kendall tau é O(N²) — só rodamos em subset se N for grande
-        if len(va) > 200_000:
-            idx = np.random.default_rng(42).choice(len(va), 200_000, replace=False)
-            tau, _ = kendalltau(va[idx], vb[idx])
-            out["kendall_subset"] = float(tau)
-        else:
-            tau, _ = kendalltau(va, vb)
-            out["kendall"] = float(tau)
-    except ImportError:
-        pass
-
-    return out
-
-
-def _rank_data(x: np.ndarray) -> np.ndarray:
-    """Retorna ranks (1-based) lidando com empates por average."""
-    order = np.argsort(x)
-    ranks = np.empty_like(order, dtype=np.float64)
-    ranks[order] = np.arange(1, len(x) + 1)
-    # Empates: average rank
-    sorted_x = x[order]
-    i = 0
-    while i < len(x):
-        j = i
-        while j + 1 < len(x) and sorted_x[j + 1] == sorted_x[i]:
-            j += 1
-        if j > i:
-            avg = (ranks[order[i]] + ranks[order[j]]) / 2
-            ranks[order[i:j + 1]] = avg
-        i = j + 1
-    return ranks
-
-
-# ---------------------------------------------------------------------------
-# Estatísticas geométricas
-# ---------------------------------------------------------------------------
-
-def geometric_stats(embeddings: np.ndarray) -> dict:
-    """
-    Estatísticas sobre magnitude e dispersão dos embeddings.
-
-    Returns
-    -------
-    dict com norm_mean/std/min/max, centroid_norm, mean_pairwise_cosine.
-    """
-    norms = np.linalg.norm(embeddings, axis=1)
-    centroid = embeddings.mean(axis=0)
-
-    normed = embeddings / np.clip(norms, 1e-12, None)[:, None]
-    # Cosine pairwise medio (sample pra evitar O(N²) em RAM)
-    n = embeddings.shape[0]
-    if n > 2000:
-        idx = np.random.default_rng(42).choice(n, 2000, replace=False)
-        sample = normed[idx]
-    else:
-        sample = normed
-    sim = sample @ sample.T
-    triu = sim[np.triu_indices_from(sim, k=1)]
-
-    return {
-        "n_samples":    int(n),
-        "dim":          int(embeddings.shape[1]),
-        "norm_mean":    float(norms.mean()),
-        "norm_std":     float(norms.std()),
-        "norm_min":     float(norms.min()),
-        "norm_max":     float(norms.max()),
-        "centroid_norm":     float(np.linalg.norm(centroid)),
-        "mean_pairwise_cos": float(triu.mean()),
-        "std_pairwise_cos":  float(triu.std()),
-    }
+    sim_matrix = rsr.compare(rdm_a, rdm_b, method=method)
+    return float(sim_matrix[0, 0])
 
 
 # ---------------------------------------------------------------------------
 # Visualização
 # ---------------------------------------------------------------------------
 
+def _rdm_to_square(rdm: rsr.RDMs) -> np.ndarray:
+    """Converte RDM rsatoolbox em matriz quadrada N×N para plotagem."""
+    return rdm.get_matrices()[0]   # primeira (e única) RDM
+
+
 def plot_results(
-    rdm_a: np.ndarray,
-    rdm_b: np.ndarray,
-    corr: dict,
+    rdm_a: rsr.RDMs,
+    rdm_b: rsr.RDMs,
+    similarities: dict,
     label_a: str,
     label_b: str,
     save_path: str,
     subsample: int = 500,
 ) -> None:
     """
-    Gera figura com:
-      - RDM A
-      - RDM B
-      - Scatter plot rank-rank entre A e B
+    Figura com 3 painéis: RDM_A | RDM_B | scatter dissimilaridades.
     """
-    n = rdm_a.shape[0]
+    mat_a = _rdm_to_square(rdm_a)
+    mat_b = _rdm_to_square(rdm_b)
+    n = mat_a.shape[0]
+
     if n > subsample:
         idx = np.random.default_rng(42).choice(n, subsample, replace=False)
         idx.sort()
-        rdm_a_vis = rdm_a[np.ix_(idx, idx)]
-        rdm_b_vis = rdm_b[np.ix_(idx, idx)]
+        mat_a_vis = mat_a[np.ix_(idx, idx)]
+        mat_b_vis = mat_b[np.ix_(idx, idx)]
     else:
-        rdm_a_vis = rdm_a
-        rdm_b_vis = rdm_b
+        mat_a_vis = mat_a
+        mat_b_vis = mat_b
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    vmax = max(mat_a_vis.max(), mat_b_vis.max())
 
-    vmax = max(rdm_a_vis.max(), rdm_b_vis.max())
-
-    im0 = axes[0].imshow(rdm_a_vis, cmap="viridis", vmin=0, vmax=vmax)
-    axes[0].set_title(f"RDM {label_a}\n({rdm_a_vis.shape[0]}×{rdm_a_vis.shape[0]})")
+    im0 = axes[0].imshow(mat_a_vis, cmap="viridis", vmin=0, vmax=vmax)
+    axes[0].set_title(f"RDM {label_a}\n({mat_a_vis.shape[0]}x{mat_a_vis.shape[0]})")
     axes[0].set_xlabel("image j")
     axes[0].set_ylabel("image i")
     plt.colorbar(im0, ax=axes[0], fraction=0.046)
 
-    im1 = axes[1].imshow(rdm_b_vis, cmap="viridis", vmin=0, vmax=vmax)
-    axes[1].set_title(f"RDM {label_b}\n({rdm_b_vis.shape[0]}×{rdm_b_vis.shape[0]})")
+    im1 = axes[1].imshow(mat_b_vis, cmap="viridis", vmin=0, vmax=vmax)
+    axes[1].set_title(f"RDM {label_b}\n({mat_b_vis.shape[0]}x{mat_b_vis.shape[0]})")
     axes[1].set_xlabel("image j")
     plt.colorbar(im1, ax=axes[1], fraction=0.046)
 
-    # Scatter plot dos triângulos superiores (subset)
-    va = upper_triangle(rdm_a_vis)
-    vb = upper_triangle(rdm_b_vis)
+    # Scatter sobre triângulo superior das RDMs visualizadas
+    iu = np.triu_indices_from(mat_a_vis, k=1)
+    va, vb = mat_a_vis[iu], mat_b_vis[iu]
     if len(va) > 20_000:
         s_idx = np.random.default_rng(42).choice(len(va), 20_000, replace=False)
         va, vb = va[s_idx], vb[s_idx]
@@ -303,10 +231,9 @@ def plot_results(
     axes[2].plot([0, vmax], [0, vmax], "r--", lw=1, label="y = x")
     axes[2].set_xlabel(f"dissimilarity ({label_a})")
     axes[2].set_ylabel(f"dissimilarity ({label_b})")
-    axes[2].set_title(
-        f"Pearson r = {corr['pearson']:.4f}\n"
-        f"Spearman ρ = {corr['spearman']:.4f}"
-    )
+
+    sim_strs = [f"{k}: {v:.4f}" for k, v in similarities.items()]
+    axes[2].set_title("RDM similarity\n" + "  |  ".join(sim_strs))
     axes[2].legend()
     axes[2].grid(alpha=0.3)
 
@@ -328,11 +255,14 @@ def run_analysis(
     label_b: str,
     n_samples: int,
     output_dir: str,
+    rdm_method: str = "correlation",
+    compare_methods: Tuple[str, ...] = ("cosine", "corr", "rho-a", "tau-a"),
 ) -> dict:
-    """Executa RSA completa entre dois conjuntos de embeddings globais."""
-    print(f"\n{'═' * 70}")
-    print(f"  RSA: {label_a}  vs  {label_b}")
-    print(f"{'═' * 70}")
+    """Executa RSA via rsatoolbox entre dois conjuntos de embeddings globais."""
+    print(f"\n{'=' * 70}")
+    print(f"  RSA (rsatoolbox): {label_a}  vs  {label_b}")
+    print(f"  rdm_method={rdm_method}   compare_methods={list(compare_methods)}")
+    print(f"{'=' * 70}")
 
     print(f"\n[1/4] Loading {n_samples} embeddings from each set...")
     emb_a, total_a = load_visual_global(folder_a, n_samples)
@@ -342,48 +272,50 @@ def run_analysis(
 
     if emb_a.shape[0] != emb_b.shape[0]:
         n = min(emb_a.shape[0], emb_b.shape[0])
-        print(f"  [WARN] Truncando para {n} amostras (igualar conjuntos)")
-        emb_a = emb_a[:n]
-        emb_b = emb_b[:n]
+        print(f"  [WARN] Truncating to {n} samples to match sets")
+        emb_a, emb_b = emb_a[:n], emb_b[:n]
 
-    print(f"\n[2/4] Geometric statistics of embeddings...")
-    stats_a = geometric_stats(emb_a)
-    stats_b = geometric_stats(emb_b)
-    print(f"  {label_a}: norm μ={stats_a['norm_mean']:.4f}±{stats_a['norm_std']:.4f}  "
-          f"cos μ={stats_a['mean_pairwise_cos']:.4f}")
-    print(f"  {label_b}: norm μ={stats_b['norm_mean']:.4f}±{stats_b['norm_std']:.4f}  "
-          f"cos μ={stats_b['mean_pairwise_cos']:.4f}")
+    print(f"\n[2/4] Building rsatoolbox Datasets...")
+    ds_a = build_dataset(emb_a, name=label_a)
+    ds_b = build_dataset(emb_b, name=label_b)
+    print(f"  {label_a}: {ds_a}")
+    print(f"  {label_b}: {ds_b}")
 
-    print(f"\n[3/4] Construindo RDMs [{emb_a.shape[0]}×{emb_a.shape[0]}]...")
-    rdm_a = build_rdm_cosine(emb_a)
-    rdm_b = build_rdm_cosine(emb_b)
-    print(f"  RDM {label_a}: μ={rdm_a.mean():.4f} std={rdm_a.std():.4f}")
-    print(f"  RDM {label_b}: μ={rdm_b.mean():.4f} std={rdm_b.std():.4f}")
+    print(f"\n[3/4] Computing RDMs (method={rdm_method})...")
+    rdm_a = compute_rdm(ds_a, method=rdm_method)
+    rdm_b = compute_rdm(ds_b, method=rdm_method)
+    mat_a = _rdm_to_square(rdm_a)
+    mat_b = _rdm_to_square(rdm_b)
+    print(f"  RDM {label_a}: shape={mat_a.shape}  mean={mat_a.mean():.4f}  std={mat_a.std():.4f}")
+    print(f"  RDM {label_b}: shape={mat_b.shape}  mean={mat_b.mean():.4f}  std={mat_b.std():.4f}")
 
-    print(f"\n[4/4] Computing correlation between RDMs...")
-    corr = rsa_correlate(rdm_a, rdm_b)
+    print(f"\n[4/4] Comparing RDMs with rsatoolbox.rdm.compare...")
+    similarities: dict = {}
+    for cmp in compare_methods:
+        try:
+            sim = compare_rdms(rdm_a, rdm_b, method=cmp)
+            similarities[cmp] = sim
+            print(f"  {cmp:<12} = {sim:.6f}")
+        except Exception as e:
+            print(f"  {cmp:<12} = FAILED ({e})")
+            similarities[cmp] = float("nan")
 
-    print(f"\n{'─' * 70}")
-    print(f"  RSA CORRELATIONS  ({corr['n_pairs']:,} dissimilarity pairs)")
-    print(f"{'─' * 70}")
-    print(f"  Pearson r  = {corr['pearson']:.6f}")
-    print(f"  Spearman ρ = {corr['spearman']:.6f}")
-    if "kendall" in corr:
-        print(f"  Kendall τ  = {corr['kendall']:.6f}")
-    elif "kendall_subset" in corr:
-        print(f"  Kendall τ  = {corr['kendall_subset']:.6f}  (subset 200k pares)")
+    # ── Interpretação ────────────────────────────────────────────────────
+    print(f"\n{'-' * 70}")
+    print(f"  INTERPRETATION")
+    print(f"{'-' * 70}")
+    ref = similarities.get("rho-a") or similarities.get("corr") or next(iter(similarities.values()))
+    if ref >= 0.95:
+        verdict = "Geometry highly PRESERVED -- upsampling is semantically safe"
+    elif ref >= 0.85:
+        verdict = "Geometry well preserved -- small local reorganizations"
+    elif ref >= 0.70:
+        verdict = "MODERATE preservation -- upsampling causes visible changes"
+    else:
+        verdict = "SIGNIFICANT reorganization -- upsampling alters the semantics"
+    print(f"  Reference similarity = {ref:.4f}  ->  {verdict}")
 
-    # Diagnóstico se algum valor for NaN
-    if not np.isfinite(corr["pearson"]) or not np.isfinite(corr["spearman"]):
-        print(f"\n  [WARN] NaN correlation detected — checking RDMs:")
-        va = upper_triangle(rdm_a)
-        vb = upper_triangle(rdm_b)
-        print(f"    var(RDM_{label_a}) = {va.var():.6e}")
-        print(f"    var(RDM_{label_b}) = {vb.var():.6e}")
-        print(f"    nan in RDM_{label_a}: {np.isnan(va).any()}  inf: {np.isinf(va).any()}")
-        print(f"    nan in RDM_{label_b}: {np.isnan(vb).any()}  inf: {np.isinf(vb).any()}")
-
-    # Salva relatório
+    # ── Salva relatório ─────────────────────────────────────────────────
     report = {
         "label_a": label_a,
         "label_b": label_b,
@@ -391,46 +323,31 @@ def run_analysis(
         "folder_b": folder_b,
         "n_samples": int(emb_a.shape[0]),
         "embedding_dim": int(emb_a.shape[1]),
-        "stats_a": stats_a,
-        "stats_b": stats_b,
+        "rdm_method": rdm_method,
         "rdm_stats_a": {
-            "mean": float(rdm_a.mean()),
-            "std":  float(rdm_a.std()),
-            "min":  float(rdm_a.min()),
-            "max":  float(rdm_a.max()),
+            "mean": float(mat_a.mean()),
+            "std":  float(mat_a.std()),
+            "min":  float(mat_a.min()),
+            "max":  float(mat_a.max()),
         },
         "rdm_stats_b": {
-            "mean": float(rdm_b.mean()),
-            "std":  float(rdm_b.std()),
-            "min":  float(rdm_b.min()),
-            "max":  float(rdm_b.max()),
+            "mean": float(mat_b.mean()),
+            "std":  float(mat_b.std()),
+            "min":  float(mat_b.min()),
+            "max":  float(mat_b.max()),
         },
-        "correlation": corr,
+        "similarities": similarities,
+        "rsatoolbox_version": getattr(rsatoolbox, "__version__", "unknown"),
     }
 
     ensure_dir(output_dir)
     json_path = os.path.join(output_dir, f"rsa_{label_a}_vs_{label_b}.json")
     with open(json_path, "w", encoding="utf-8") as fp:
         json.dump(report, fp, indent=2)
-    print(f"\n  [report] {json_path}")
+    print(f"\n  [report] saved to {json_path}")
 
     png_path = os.path.join(output_dir, f"rsa_{label_a}_vs_{label_b}.png")
-    plot_results(rdm_a, rdm_b, corr, label_a, label_b, png_path)
-
-    # Interpretação automática
-    print(f"\n{'─' * 70}")
-    print(f"  INTERPRETATION")
-    print(f"{'─' * 70}")
-    rho = corr["spearman"]
-    if rho >= 0.95:
-        verdict = "GLOBAL geometry highly preserved — upsampling is semantically safe"
-    elif rho >= 0.85:
-        verdict = "GLOBAL geometry well preserved — minor local reorganizations"
-    elif rho >= 0.70:
-        verdict = "MODERATE preservation — upsampling causes visible changes"
-    else:
-        verdict = "SIGNIFICANT space reorganization — upsampling alters semantics"
-    print(f"  Spearman ρ = {rho:.4f}  →  {verdict}")
+    plot_results(rdm_a, rdm_b, similarities, label_a, label_b, png_path)
 
     return report
 
@@ -440,20 +357,25 @@ def run_analysis(
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="RSA global entre embeddings com/sem AnyUp")
+    parser = argparse.ArgumentParser(
+        description="RSA global via rsatoolbox: anyup vs noup"
+    )
     parser.add_argument("--n_samples", type=int, default=5000,
-                        help="Amostras por conjunto para o RDM (default: 5000)")
-    parser.add_argument("--split", choices=["train", "val", "test", "all"], default="test",
-                        help="Split a analisar (default: test)")
+                        help="Samples per set for the RDM (default: 5000)")
+    parser.add_argument("--split", choices=["train", "val", "test", "all"], default="test")
     parser.add_argument("--folder_anyup", type=str, default=None,
-                        help="Override do diretório do conjunto com AnyUp")
+                        help="Override directory of AnyUp set")
     parser.add_argument("--folder_noup", type=str, default=None,
-                        help="Override do diretório do conjunto sem AnyUp")
-    parser.add_argument("--output_dir", type=str, default="results/rsa_global",
-                        help="Diretório para JSON + PNGs")
+                        help="Override directory of no-up set")
+    parser.add_argument("--output_dir", type=str, default="results/rsa_global")
+    parser.add_argument("--rdm_method", type=str, default="correlation",
+                        choices=["correlation", "euclidean"],
+                        help="rsatoolbox method for calc_rdm (default: correlation)")
+    parser.add_argument("--compare_methods", nargs="+",
+                        default=["cosine", "corr", "rho-a", "tau-a"],
+                        help="rsatoolbox compare methods (default: cosine corr rho-a tau-a)")
     args = parser.parse_args()
 
-    # Paths padrão por split (consistentes com os outros scripts)
     defaults = {
         "train": ("F:/COYO/embeds/train_anyup/", "E:/COYO/embeds/train_noup/"),
         "val":   ("G:/coyo/embeds/val_anyup/",   "E:/COYO/embeds/val_noup/"),
@@ -484,18 +406,23 @@ if __name__ == "__main__":
             label_b=f"{split}_noup",
             n_samples=args.n_samples,
             output_dir=args.output_dir,
+            rdm_method=args.rdm_method,
+            compare_methods=tuple(args.compare_methods),
         )
         all_reports[split] = report
 
-    # Sumário final
     if len(all_reports) > 1:
-        print(f"\n\n{'═' * 70}")
-        print(f"  FINAL SUMMARY")
-        print(f"{'═' * 70}")
-        print(f"  {'Split':<10} {'N':>8} {'Pearson r':>12} {'Spearman ρ':>14}")
-        print(f"  {'-'*10} {'-'*8} {'-'*12} {'-'*14}")
+        print(f"\n\n{'=' * 70}")
+        print(f"  FINAL SUMMARY (rsatoolbox)")
+        print(f"{'=' * 70}")
+        first = next(iter(all_reports.values()))
+        cmp_keys = list(first["similarities"].keys())
+        header = f"  {'Split':<10} {'N':>8} " + "".join(f"{k:>12}" for k in cmp_keys)
+        print(header)
+        print("  " + "-" * (len(header) - 2))
         for split, rep in all_reports.items():
             n = rep["n_samples"]
-            r = rep["correlation"]["pearson"]
-            rho = rep["correlation"]["spearman"]
-            print(f"  {split:<10} {n:>8,} {r:>12.4f} {rho:>14.4f}")
+            row = f"  {split:<10} {n:>8,} " + "".join(
+                f"{rep['similarities'].get(k, float('nan')):>12.4f}" for k in cmp_keys
+            )
+            print(row)

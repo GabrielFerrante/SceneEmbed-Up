@@ -1,0 +1,14 @@
+{
+  "split": "test",
+  "kernel": "linear",
+  "device": "cuda",
+  "library": "ckatorch",
+  "n_samples": 5000,
+  "folder_anyup": "G:/coyo/embeds/test_anyup/",
+  "folder_noup": "E:/COYO/embeds/test_noup/",
+  "cka": {
+    "visual_anyup <-> text": 0.0423286035656929,
+    "visual_noup  <-> text": 0.007006575353443623,
+    "visual_anyup <-> visual_noup": 0.001883300836198032
+  }
+}

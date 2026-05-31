@@ -228,9 +228,9 @@ def run_all(
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Orquestra análise completa do COYO.")
     parser.add_argument("--root_images",   default="F:/COYO/coyo/extracted")
-    parser.add_argument("--max_images",    type=int, default=0)
+    parser.add_argument("--max_images",    type=int, default=480000)
     parser.add_argument("--shard_val",     default="G:/coyo/embeds/val_anyup")
-    parser.add_argument("--max_embeds",    type=int, default=5_000)
+    parser.add_argument("--max_embeds",    type=int, default=5000)
     parser.add_argument("--train_dir",     default="F:/COYO/embeds/train_anyup")
     parser.add_argument("--val_dir",       default="G:/coyo/embeds/val_anyup")
     parser.add_argument("--test_dir",      default="G:/coyo/embeds/test_anyup")

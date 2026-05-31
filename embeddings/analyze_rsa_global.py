@@ -368,7 +368,7 @@ if __name__ == "__main__":
     parser.add_argument("--folder_noup", type=str, default=None,
                         help="Override directory of no-up set")
     parser.add_argument("--output_dir", type=str, default="results/rsa_global")
-    parser.add_argument("--rdm_method", type=str, default="correlation",
+    parser.add_argument("--rdm_method", type=str, default="euclidean",
                         choices=["correlation", "euclidean"],
                         help="rsatoolbox method for calc_rdm (default: correlation)")
     parser.add_argument("--compare_methods", nargs="+",

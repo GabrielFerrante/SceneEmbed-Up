@@ -1,0 +1,28 @@
+{
+  "label_a": "train_anyup",
+  "label_b": "train_noup",
+  "folder_a": "F:/COYO/embeds/train_anyup/",
+  "folder_b": "E:/COYO/embeds/train_noup/",
+  "n_samples": 5000,
+  "embedding_dim": 768,
+  "rdm_method": "euclidean",
+  "rdm_stats_a": {
+    "mean": 0.2979297838268576,
+    "std": 0.09584637709441557,
+    "min": -2.384185791015625e-07,
+    "max": 0.6904340386390686
+  },
+  "rdm_stats_b": {
+    "mean": 0.5039379763024481,
+    "std": 0.06942068990360628,
+    "min": -1.5894572413799324e-07,
+    "max": 0.9426715970039368
+  },
+  "similarities": {
+    "cosine": 0.9433455467224121,
+    "corr": 0.002702455036342144,
+    "rho-a": 0.004248685915758689,
+    "tau-a": 0.0028249623895187036
+  },
+  "rsatoolbox_version": "unknown"
+}

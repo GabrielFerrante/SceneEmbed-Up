@@ -1,0 +1,28 @@
+{
+  "label_a": "val_anyup",
+  "label_b": "val_noup",
+  "folder_a": "G:/coyo/embeds/val_anyup/",
+  "folder_b": "E:/COYO/embeds/val_noup/",
+  "n_samples": 5000,
+  "embedding_dim": 768,
+  "rdm_method": "euclidean",
+  "rdm_stats_a": {
+    "mean": 0.2970263115087121,
+    "std": 0.09548326461438879,
+    "min": -3.178914482759865e-07,
+    "max": 0.6853895783424377
+  },
+  "rdm_stats_b": {
+    "mean": 0.5049037248947496,
+    "std": 0.07112319967511069,
+    "min": -1.5894572413799324e-07,
+    "max": 0.9139416813850403
+  },
+  "similarities": {
+    "cosine": 0.9435465931892395,
+    "corr": 0.015221868641674519,
+    "rho-a": 0.014933686587762347,
+    "tau-a": 0.009957526618978136
+  },
+  "rsatoolbox_version": "unknown"
+}

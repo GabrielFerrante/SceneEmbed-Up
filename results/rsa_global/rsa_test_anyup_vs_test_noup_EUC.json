@@ -1,0 +1,28 @@
+{
+  "label_a": "test_anyup",
+  "label_b": "test_noup",
+  "folder_a": "G:/coyo/embeds/test_anyup/",
+  "folder_b": "E:/COYO/embeds/test_noup/",
+  "n_samples": 5000,
+  "embedding_dim": 768,
+  "rdm_method": "euclidean",
+  "rdm_stats_a": {
+    "mean": 0.29878951964317574,
+    "std": 0.09549542599213649,
+    "min": -2.384185791015625e-07,
+    "max": 0.669079601764679
+  },
+  "rdm_stats_b": {
+    "mean": 0.5042983862671695,
+    "std": 0.07095910764773533,
+    "min": -1.5894572413799324e-07,
+    "max": 0.9078278541564941
+  },
+  "similarities": {
+    "cosine": 0.9435047507286072,
+    "corr": 0.0017704912461340427,
+    "rho-a": 0.0010391575129009875,
+    "tau-a": 0.0006922474894650096
+  },
+  "rsatoolbox_version": "unknown"
+}

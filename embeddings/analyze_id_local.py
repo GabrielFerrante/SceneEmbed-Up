@@ -425,9 +425,9 @@ def _id_stats(ids: np.ndarray) -> dict:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="ID local TwoNN por imagem (com vs sem AnyUp)")
-    parser.add_argument("--n_images", type=int, default=500,
+    parser.add_argument("--n_images", type=int, default=5000,
                         help="Quantas imagens analisar por conjunto (default: 500)")
-    parser.add_argument("--split", choices=["train", "val", "test", "all"], default="test",
+    parser.add_argument("--split", choices=["train", "val", "test", "all"], default="all",
                         help="Split a analisar (default: test)")
     parser.add_argument("--folder_anyup", type=str, default=None,
                         help="Override do diretório com AnyUp")

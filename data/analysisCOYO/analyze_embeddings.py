@@ -397,11 +397,11 @@ def _plot_results(
     if v_sub_n.shape[1] == t_sub_n.shape[1]:
         # Cross-modal disponível
         sim_sub = v_sub_n @ t_sub_n.T
-        heatmap_title = f"Heatmap Similaridade V↔T\n({n_h}×{n_h} sub-amostras)"
+        heatmap_title = f"Heatmap Similarity V↔T\n({n_h}×{n_h} sub-samples)"
     else:
         # Intra-visual: imagem vs imagem
         sim_sub = v_sub_n @ v_sub_n.T
-        heatmap_title = f"Heatmap Similaridade V↔V\n({n_h}×{n_h} sub-amostras, intra-visual)"
+        heatmap_title = f"Heatmap Similarity V↔V\n({n_h}×{n_h} sub-samples, intra-visual)"
 
     im = axes[1, 2].imshow(sim_sub, aspect="auto", cmap="RdYlGn", vmin=-0.5, vmax=1.0)
     axes[1, 2].set_title(heatmap_title)

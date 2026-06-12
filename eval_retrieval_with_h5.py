@@ -290,7 +290,8 @@ if __name__ == "__main__":
     aligner = LoRACrossAttentionAligner(visual_dim=768, text_dim=4096, rank=64)
 
     #weights_path = "checkpoints/best_aligner_no_up.pth"
-    weights_path = "checkpoints/best_aligner.pth"
+    #weights_path = "checkpoints/best_aligner.pth"
+    weights_path = "checkpoints/best_ats_aligner.pth"
     if os.path.exists(weights_path):
         aligner.load_state_dict(
             torch.load(weights_path, map_location=device),

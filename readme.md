@@ -70,8 +70,16 @@ python train_aligner_with_Images.py    # alternativa: imagens direto, VRAM > 16 
 # Variante B — sem upsampler (recomendado para retrieval)
 python train_aligner_no_up.py          # shards H5 [N, 196, 768]
 
+# Variante C — com AnyUp + seleção adaptativa de tokens (ATS, aprendido)
+python train_aligner_ats_h5.py         # shards H5 [N,1024,768] → seleciona K=196 patches
+
+# Variante D — com AnyUp + seleção via PCA (critério de variância, clássico)
+python train_aligner_pca_h5.py         # shards H5 [N,1024,768] → seleciona K=196 patches
+
 # → checkpoints/best_aligner.pth          (com AnyUp)
 # → checkpoints/best_aligner_no_up.pth    (sem upsampler)
+# → checkpoints/best_ats_aligner.pth      (com AnyUp + ATS)
+# → checkpoints/best_pca_aligner.pth      (com AnyUp + PCA)
 
 # Avaliação Recall@K
 python eval_retrieval_with_h5.py       # ajustar paths + ckpt no script
@@ -142,6 +150,8 @@ COYO → generate_shards{_no_up}? → train_aligner{_no_up}? → eval_retrieval_
 |---|---|---|
 | `checkpoints/best_aligner.pth` | `train_aligner_with_h5.py` | `eval_retrieval_with_h5.py`, `eval_retrieval_sg.py` |
 | `checkpoints/best_aligner_no_up.pth` | `train_aligner_no_up.py` | `eval_retrieval_sg_no_up.py` |
+| `checkpoints/best_ats_aligner.pth` | `train_aligner_ats_h5.py` | avaliação da variante ATS (sampler + aligner) |
+| `checkpoints/best_pca_aligner.pth` | `train_aligner_pca_h5.py` | avaliação da variante PCA (aligner) |
 | `checkpoints/reltr/reltr_vg.pth` | download (pré-treinado) | ambos os `eval_retrieval_sg*.py` |
 
 ---
@@ -261,6 +271,35 @@ Cada `ReRankResult` guarda também as triplas mais alinhadas com a query (`expla
 
 ---
 
+## Seleção Adaptativa de Patches (AnyUp 1024 → 196)
+
+A análise de Dimensão Intrínseca (`analyze_id_local.py`) mostra que os 1024
+patches AnyUp têm ID ≈ 1.88 (vs ID ≈ 5.0 para os 196 patches sem upsampler) —
+isto é, os patches upsampled são altamente redundantes (manifold quasi-1D),
+o que dificulta o cross-attention do aligner (entropia de atenção fica alta
+e o treino estagna mais cedo). As duas variantes abaixo reduzem 1024 → K=196
+patches por relevância **antes** do `LoRACrossAttentionAligner`, igualando o
+número de tokens ao da variante sem upsampler.
+
+| Script | Método | Aprendido? | Critério de seleção |
+|---|---|---|---|
+| [train_aligner_ats_h5.py](train_aligner_ats_h5.py) | `AdaptiveTokenSampler` (ATS) | Sim | score = content_proj(patch) + dot(patch, text_gate(query)); BCE straight-through |
+| [train_aligner_pca_h5.py](train_aligner_pca_h5.py) | `PCAVarianceSampler` | Não | PCA por imagem (`torch.pca_lowrank`); score = norma da projeção nos top-64 componentes principais |
+
+- **ATS** (`train_aligner_ats_h5.py`) — inspirado em Fayyaz et al. (2022), ECCV.
+  Scorer aprendido (text-guided + content-based), treinado via loss adicional
+  `Loss/ats` (BCE-with-logits straight-through). Checkpoint salva
+  `sampler` + `aligner` juntos (`nn.ModuleDict`).
+- **PCA** (`train_aligner_pca_h5.py`) — baseline clássico, determinístico,
+  sem parâmetros extras. Seleciona os patches que mais contribuem para as
+  direções de maior variância da imagem (PCA projection score).
+
+Ambos reutilizam os shards `train_anyup`/`val_anyup` já gerados, mantêm a
+mesma loss contrastiva + `entropy_reg` do `train_aligner_with_h5.py`, e
+suportam resume via `RESUME_CHECKPOINT`/`START_EPOCH` no `__main__`.
+
+---
+
 ## Análises Geométricas dos Embeddings
 
 Scripts em `embeddings/` para comparar a estrutura geométrica dos embeddings com vs sem upsampling:
@@ -320,6 +359,8 @@ SceneEmbed-Up/
 ├── train_aligner_with_h5.py            # Treino aligner — shards com AnyUp
 ├── train_aligner_with_Images.py        # Treino aligner — imagens direto
 ├── train_aligner_no_up.py              # Treino aligner — shards SEM upsampler
+├── train_aligner_ats_h5.py             # Treino aligner — AnyUp + ATS (1024→196, aprendido)
+├── train_aligner_pca_h5.py             # Treino aligner — AnyUp + PCA (1024→196, clássico)
 ├── eval_retrieval_with_h5.py           # Recall@K bidirecional sobre shards
 ├── eval_retrieval_with_images.py       # Recall@K sobre imagens brutas
 ├── eval_retrieval_sg.py                # Retrieval + SG + rerank   (variante AnyUp)
@@ -380,6 +421,7 @@ A versão sem upsampler é ~4× menor, ~2-3× mais rápida de gerar, e salva os 
 - [COYO-700M](https://github.com/kakaobrain/coyo-dataset) — Kakao Brain
 - [Visual Genome](https://homes.cs.washington.edu/~ranjay/visualgenome/) — Krishna et al.
 - Facco et al., *Estimating the intrinsic dimension of datasets by a minimal neighborhood information*, Scientific Reports 2017
+- Fayyaz et al., *Adaptive Token Sampling For Efficient Vision Transformers (ATS)*, ECCV 2022
 - Kornblith et al., *Similarity of Neural Network Representations Revisited (CKA)*, ICML 2019
 - Kriegeskorte et al., *Representational similarity analysis*, Frontiers in Systems Neuroscience 2008
 - Nogueira & Cho, *Passage Re-ranking with BERT*, 2019

@@ -305,8 +305,17 @@ def run_analysis(
     n_images: int,
     output_dir: str,
     discard_fraction: float = 0.1,
+    upsampled: str = "a",
 ) -> dict:
-    """Executa análise de ID local em N imagens de cada conjunto."""
+    """
+    Executa análise de ID local em N imagens de cada conjunto.
+
+    `upsampled` indica qual dos dois conjuntos passou por upsampling ("a" ou "b").
+    É usado apenas na interpretação automática: o Δ reportado permanece sempre
+    ID(b) − ID(a), independentemente desse parâmetro.
+    """
+    if upsampled not in ("a", "b"):
+        raise ValueError(f"upsampled deve ser 'a' ou 'b', recebido: {upsampled!r}")
     print(f"\n{'═' * 70}")
     print(f"  LOCAL ID: {label_a}  vs  {label_b}")
     print(f"{'═' * 70}")
@@ -364,25 +373,37 @@ def run_analysis(
         print(f"  Paired Δ ({label_b}−{label_a}): μ={paired_delta.mean():+.3f}  "
               f"({(paired_delta > 0).mean()*100:.1f}% of images have higher ID in {label_b})")
 
-    # Interpretação automática (baseado no Δ)
+    # Interpretação automática — efeito DO UPSAMPLING sobre o ID.
+    # Δ = ID(b) − ID(a). Se o conjunto upsampled for o `a`, o efeito do
+    # upsampling é −Δ; caso contrário é +Δ.
     print(f"\n{'─' * 70}")
     print(f"  INTERPRETATION")
     print(f"{'─' * 70}")
     delta = report["paired"]["delta_mean"]
-    if abs(delta) < 1.0:
-        verdict = (f"ID virtually EQUAL → the {feats_b.shape[1]} patches of {label_b} "
-                   f"lie on the SAME submanifold as the {feats_a.shape[1]} patches of {label_a}; "
-                   f"upsampling is geometrically redundant")
-    elif delta > 5.0:
-        verdict = (f"ID much HIGHER in {label_b} (+{delta:.1f}) → upsampling added "
+    up_label, base_label = (label_a, label_b) if upsampled == "a" else (label_b, label_a)
+    up_patches = feats_a.shape[1] if upsampled == "a" else feats_b.shape[1]
+    base_patches = feats_b.shape[1] if upsampled == "a" else feats_a.shape[1]
+    delta_up = -delta if upsampled == "a" else delta
+
+    if abs(delta_up) < 1.0:
+        verdict = (f"ID virtually EQUAL → the {up_patches} patches of {up_label} "
+                   f"lie on the SAME submanifold as the {base_patches} patches of "
+                   f"{base_label}; upsampling is geometrically redundant")
+    elif delta_up > 5.0:
+        verdict = (f"ID much HIGHER with upsampling ({delta_up:+.1f}) → upsampling added "
                    f"real complexity (microtextures / high frequency)")
-    elif delta > 0:
-        verdict = (f"ID MODERATELY higher in {label_b} (+{delta:.1f}) → upsampling "
+    elif delta_up > 0:
+        verdict = (f"ID MODERATELY higher with upsampling ({delta_up:+.1f}) → upsampling "
                    f"refined local structure but preserves smooth topology")
     else:
-        verdict = (f"ID LOWER in {label_b} ({delta:.1f}) → upsampling SMOOTHED the patch "
-                   f"cloud (implicit anti-aliasing)")
-    print(f"  Δ = {delta:+.3f}  →  {verdict}")
+        verdict = (f"ID LOWER with upsampling ({delta_up:+.1f}) → upsampling SMOOTHED the "
+                   f"patch cloud (implicit anti-aliasing / redundant patches)")
+    print(f"  Δ ({label_b}−{label_a}) = {delta:+.3f}   "
+          f"|   upsampling effect on ID = {delta_up:+.3f}")
+    print(f"  →  {verdict}")
+
+    report["upsampled_label"] = up_label
+    report["paired"]["delta_upsampling"] = float(delta_up)
 
     # Salva
     ensure_dir(output_dir)
@@ -470,6 +491,7 @@ if __name__ == "__main__":
             n_images=args.n_images,
             output_dir=args.output_dir,
             discard_fraction=args.discard,
+            upsampled="a",          # folder_a = AnyUp
         )
         all_reports[split] = report
 
@@ -477,11 +499,15 @@ if __name__ == "__main__":
         print(f"\n\n{'═' * 70}")
         print(f"  FINAL SUMMARY — Local ID per Set")
         print(f"{'═' * 70}")
-        print(f"  {'Split':<10} {'N imgs':>8} {'ID (anyup)':>14} {'ID (noup)':>14} {'Avg Δ':>10}")
-        print(f"  {'-'*10} {'-'*8} {'-'*14} {'-'*14} {'-'*10}")
+        print(f"  {'Split':<10} {'N imgs':>8} {'ID (anyup)':>14} {'ID (noup)':>14} "
+              f"{'Δ (noup−anyup)':>16} {'% noup higher':>15}")
+        print(f"  {'-'*10} {'-'*8} {'-'*14} {'-'*14} {'-'*16} {'-'*15}")
         for split, rep in all_reports.items():
             n = rep["n_images"]
             a = rep["id_stats_a"]["mean"]
             b = rep["id_stats_b"]["mean"]
             d = rep["paired"]["delta_mean"]
-            print(f"  {split:<10} {n:>8,} {a:>14.3f} {b:>14.3f} {d:>+10.3f}")
+            s = rep["paired"]["delta_std"]
+            f = rep["paired"]["frac_b_higher"] * 100.0
+            print(f"  {split:<10} {n:>8,} {a:>14.3f} {b:>14.3f} "
+                  f"{f'{d:+.3f} ± {s:.3f}':>16} {f:>14.1f}%")
